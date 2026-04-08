@@ -4,7 +4,7 @@ from traits.api import HasTraits , CArray, Instance,on_trait_change
 from collections import OrderedDict
 import logging
 import json
-import interpolator
+from . import interpolator
 import re
 
 log = logging.getLogger()
@@ -228,7 +228,7 @@ class Lead(object):
             self.add_contact(new_mask, *self._next_contact_info())
             return
 
-        last_contact = self.contacts.values()[-1]
+        last_contact = list(self.contacts.values())[-1]
 
         new_mask = PointMask.centered_proximity_mask(self.point_cloud, centered_coordinate, self.radius)
         if not new_mask.mask.any():
@@ -262,7 +262,7 @@ class Lead(object):
         if len(self.contacts) == 0:
             return '1', (1, 1), 1
 
-        last_contact = self.contacts.values()[-1]
+        last_contact = list(self.contacts.values())[-1]
 
         last_label = last_contact.label
         last_num = int(re.findall(r"\d+", last_label)[-1])
@@ -439,13 +439,13 @@ class Lead(object):
         contact_n = sorted_contacts[1]
         lead_unit_vector = (contact_n.center - contact_1.center)
         # Micro-contact positions are in relative units from the center of the last contact
-        micro_nums = iter(xrange(1,1+sum(self.micros['numbering'])))
+        micro_nums = iter(range(1,1+sum(self.micros['numbering'])))
         contacts=[]
         for i,(n_contacts,spacing) in enumerate(zip(self.micros['numbering'],self.micros['spacing'])):
             micro_center = spacing*lead_unit_vector+contact_1.center
             for j in range(n_contacts):
                 lead_location = (float('%s.%s'%(i+1,j+1)),1)
-                contact_num = str(micro_nums.next())
+                contact_num = str(next(micro_nums))
                 contacts.append(dict(
                     center=micro_center,
                     point_cloud=self.point_cloud,
@@ -546,12 +546,13 @@ class CT(object):
         self.filename = img_file
         log.debug("Loading {}".format(img_file))
         img = nib.load(self.filename)
-        self.data = img.get_data().squeeze()
-        self.brainmask = np.zeros(img.get_data().shape, bool)
+        data = img.get_fdata()
+        self.data = data.squeeze()
+        self.brainmask = np.zeros(data.shape, bool)
         self.affine = img.affine[:3,:]
 
     def add_mask(self, filename):
-        mask = nib.load(filename).get_data()
+        mask = nib.load(filename).get_fdata()
         self.brainmask = mask
 
     def interpolate(self, lead_label):
@@ -613,10 +614,10 @@ class CT(object):
 
     def to_vox_mom(self,fname,include_bipolar=False):
         csv_out = []
-        for lead in sorted(self.get_leads().values(),cmp=lambda x,y:cmp(x.label.upper(),y.label.upper()) ):
+        for lead in sorted(self.get_leads().values(), key=lambda x: x.label.upper()):
             ltype = lead.type_
             dims = lead.dimensions
-            for contact in sorted(lead.contacts.keys(),cmp=lambda x,y: cmp(int(x),int(y))):
+            for contact in sorted(lead.contacts.keys(), key=lambda x: int(x)):
                 voxel = np.rint(lead.contacts[contact].center)
                 contact_name = lead.label+contact
                 csv_out += "%s\t%s\t%s\t%s\t%s\t%s %s\n"%(

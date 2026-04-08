@@ -1,10 +1,11 @@
 import os
 
+os.environ.setdefault('QT_API', 'pyqt5')
 os.environ['ETS_TOOLKIT'] = 'qt4'
 
 from pyface.qt import QtGui, QtCore
 from model.scan import CT
-from slice_viewer import SliceViewWidget
+from .slice_viewer import SliceViewWidget
 from mayavi.core.ui.api import MayaviScene, MlabSceneModel, \
     SceneEditor
 from mayavi import mlab
@@ -39,7 +40,7 @@ class PylocControl(object):
     """
     def __init__(self, config=None):
         if config == None:
-            config = yaml.load(open("../model/config.yml"))
+            config = yaml.safe_load(open("../model/config.yml"))
 
         self.app = QtGui.QApplication.instance() #: The underlying application. Runs automatically
         self.view = PylocWidget(self, config) #: The base object for the GUI
@@ -132,7 +133,7 @@ class PylocControl(object):
         Callback for "Load Scan" button. See :load_ct:
         :return:
         """
-        file_ = QtGui.QFileDialog().getOpenFileName(None, 'Select Scan', '.', '(*)')
+        file_, _ = QtGui.QFileDialog().getOpenFileName(None, 'Select Scan', '.', '(*)')
         if file_:
             self.load_ct(filename=file_)
             self.view.task_bar.define_leads_button.setEnabled(True)
@@ -146,16 +147,21 @@ class PylocControl(object):
         :param filename: The name of the CT file.
         :return:
         """
-        self.ct = CT(self.config)
-        self.ct.load(filename,self.config['ct_threshold'])
-        self.view.slice_view.set_label(filename)
-        self.view.contact_panel.update_contacts()
-        self.view.contact_panel.setEnabled(True)
-        self.view.add_cloud(self.ct, '_ct', callback=self.select_coordinate)
-        self.view.add_cloud(self.ct, '_leads')
-        self.view.add_cloud(self.ct, '_selected')
-        self.view.add_RAS(self.ct)
-        self.view.set_slice_scan(self.ct.data)
+        try:
+            self.ct = CT(self.config)
+            self.ct.load(filename,self.config['ct_threshold'])
+            self.view.slice_view.set_label(filename)
+            self.view.contact_panel.update_contacts()
+            self.view.contact_panel.setEnabled(True)
+            self.view.add_cloud(self.ct, '_ct', callback=self.select_coordinate)
+            self.view.add_cloud(self.ct, '_leads')
+            self.view.add_cloud(self.ct, '_selected')
+            self.view.add_RAS(self.ct)
+            self.view.set_slice_scan(self.ct.data)
+        except Exception as e:
+            log.error("Failed to load CT: {}".format(e))
+            import traceback
+            traceback.print_exc()
 
     def exec_(self):
         self.app.exec_()
@@ -182,13 +188,13 @@ class PylocControl(object):
         Callback to save the localized coordinates in either JSON or text format
         :return:
         """
-        file,file_filter = QtGui.QFileDialog().getSaveFileNameAndFilter(None,'Save as:',os.path.join(os.getcwd(),'voxel_coordinates.json'),
-                                                            'JSON (*.json);;TXT (*.txt)','JSON (*.json)')
+        file, file_filter = QtGui.QFileDialog().getSaveFileName(None,'Save as:',os.path.join(os.getcwd(),'voxel_coordinates.json'),
+                                                            'JSON (*.json);;TXT (*.txt)')
         if file:
             self.ct.saveas(file,os.path.splitext(file)[-1],self.view.task_bar.bipolar_box.isChecked())
 
     def load_coordinates(self):
-        file = QtGui.QFileDialog().getOpenFileName(None, 'Select voxel_coordinates.json', '.', '(*.json)')
+        file, _ = QtGui.QFileDialog().getOpenFileName(None, 'Select voxel_coordinates.json', '.', '(*.json)')
         if file:
             self.ct.from_json(file)
             self.view.update_cloud('_leads')
@@ -984,20 +990,37 @@ class CloudView(object):
 
     def plot(self):
         labels, x, y, z = self.ct.xyz(self.label)
-        self._plot = mlab.points3d(x, y, z,  # self.get_colors(labels, x, y, z),
+        empty = len(x) == 0
+        if empty:
+            x, y, z = [0], [0], [0]
+        self._plot = mlab.points3d(x, y, z,
                                    mode='cube', resolution=3,
                                    colormap=self.colormap,
                                    opacity=.5,
                                    vmax=1, vmin=0,
                                    scale_mode='none', scale_factor=1)
-        self._plot.mlab_source.set(scalars=self.get_colors(labels, x, y, z))
+        if empty:
+            self._plot.visible = False
+        else:
+            self._plot.mlab_source.set(scalars=self.get_colors(labels, x, y, z))
 
     def unplot(self):
-        self._plot.mlab_source.reset(x=[], y=[], z=[], scalars=[])
+        if self._plot is not None:
+            self._plot.mlab_source.reset(x=[0], y=[0], z=[0], scalars=[0])
+            self._plot.visible = False
 
     def update(self):
         labels, x, y, z = self.ct.xyz(self.label)
         log.debug("Updating cloud {} with {} points".format(self.label, len(labels)))
+        if len(x) == 0:
+            if self._plot is not None:
+                self._plot.mlab_source.reset(x=[0], y=[0], z=[0], scalars=[0])
+                self._plot.visible = False
+            return
+        if self._plot is None:
+            self.plot()
+            return
+        self._plot.visible = True
         self._plot.mlab_source.reset(
             x=x, y=y, z=z, scalars=self.get_colors(labels, x, y, z))
 
@@ -1053,7 +1076,7 @@ class AxisView(CloudView):
 if __name__ == '__main__':
     # controller = PylocControl(yaml.load(open(os.path.join(os.path.dirname(__file__) , "../config.yml"))))
     #controller = PylocControl()
-    controller = PylocControl(yaml.load(open(os.path.join(os.path.dirname(__file__), "../config.yml"))))
+    controller = PylocControl(yaml.safe_load(open(os.path.join(os.path.dirname(__file__), "../config.yml"))))
 
     # controller.load_ct("../T01_R1248P_CT.nii.gz")
     # controller.load_ct('/Volumes/rhino_mount/data10/RAM/subjects/R1226D/tal/images/combined/R1226D_CT_combined.nii.gz')
@@ -1067,7 +1090,7 @@ if __name__ == '__main__':
 
 if __name__ == 'x__main__':
     app = QtGui.QApplication.instance()
-    x = LeadDefinitionWidget(None, yaml.load(open(os.path.join(os.path.dirname(__file__), "../model/config.yml"))))
+    x = LeadDefinitionWidget(None, yaml.safe_load(open(os.path.join(os.path.dirname(__file__), "../model/config.yml"))))
     x.show()
     window = QtGui.QMainWindow()
     window.setCentralWidget(x)
