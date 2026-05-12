@@ -1,0 +1,386 @@
+import { useEffect, useRef } from "react";
+import { Niivue } from "@niivue/niivue";
+
+const API = process.env.REACT_APP_API_URL || "";
+
+const LEAD_COLORS = [
+  [255, 99, 99],
+  [99, 199, 255],
+  [255, 199, 99],
+  [149, 255, 99],
+  [199, 99, 255],
+  [99, 255, 199],
+  [255, 99, 199],
+  [255, 255, 99],
+  [99, 99, 255],
+  [255, 149, 99],
+];
+
+/** Numeric order for labels like LA1 (first integer in string). */
+function contactLabelSortKey(label) {
+  if (label == null) return NaN;
+  const m = String(label).match(/\d+/);
+  return m ? parseInt(m[0], 10) : NaN;
+}
+
+function buildContactsConnectome(contacts, leads) {
+  const leadIdx = (name) =>
+    Math.max(0, leads.findIndex((l) => l.name === name));
+  const nodes = contacts.map((c) => ({
+    name: `${c.lead}${c.label}`,
+    x: c.coord?.R ?? 0,
+    y: c.coord?.A ?? 0,
+    z: c.coord?.S ?? 0,
+    colorValue: leadIdx(c.lead),
+    sizeValue: 1,
+  }));
+
+  const edges = [];
+  const byLead = new Map();
+  contacts.forEach((c, i) => {
+    if (!c.coord) return;
+    const n = contactLabelSortKey(c.label);
+    if (!Number.isFinite(n)) return;
+    if (!byLead.has(c.lead)) byLead.set(c.lead, []);
+    byLead.get(c.lead).push({ i, n });
+  });
+  for (const [leadName, arr] of byLead) {
+    arr.sort((a, b) => a.n - b.n);
+    const cv = leadIdx(leadName);
+    for (let k = 0; k < arr.length - 1; k++) {
+      edges.push({
+        first: arr[k].i,
+        second: arr[k + 1].i,
+        colorValue: cv,
+      });
+    }
+  }
+
+  const maxLeadIdx = Math.max(1, leads.length - 1);
+  return {
+    name: "contacts",
+    nodes,
+    edges,
+    nodeColormap: "warm",
+    nodeColormapNegative: "winter",
+    nodeMinColor: 0,
+    nodeMaxColor: maxLeadIdx,
+    nodeScale: 2.0,
+    edgeColormap: "warm",
+    edgeColormapNegative: "winter",
+    edgeMin: 0,
+    edgeMax: maxLeadIdx,
+    edgeScale: 1.25,
+    legendLineThickness: 0,
+  };
+}
+
+function buildPreviewConnectome(coord, label) {
+  return {
+    name: "preview",
+    nodes: [
+      {
+        name: label || "?",
+        x: coord.R,
+        y: coord.A,
+        z: coord.S,
+        colorValue: 1,
+        sizeValue: 1.4,
+      },
+    ],
+    edges: [],
+    // Yellow-ish: use 'warm' min/max so colorValue 1 maps to bright yellow
+    nodeColormap: "warm",
+    nodeColormapNegative: "winter",
+    nodeMinColor: 0,
+    nodeMaxColor: 1,
+    nodeScale: 2.5,
+    edgeColormap: "warm",
+    edgeColormapNegative: "winter",
+    edgeMin: 2,
+    edgeMax: 6,
+    edgeScale: 1,
+    legendLineThickness: 0,
+  };
+}
+
+const CLIP_PLANE_ANGLES = {
+  sagittal: [270, 0],
+  coronal: [0, 0],
+  axial: [0, 90],
+};
+
+// NiiVue sliceType: 0=axial, 1=coronal, 2=sagittal, 3=multiplanar, 4=render
+const LAYOUT_TO_SLICETYPE = {
+  axial: 0,
+  coronal: 1,
+  sagittal: 2,
+  multi: 3,
+  render: 4,
+};
+
+export default function NiiVueViewer({
+  scanFilename,
+  calMin,
+  calMax,
+  clipDepth,
+  clipPlane,
+  onLocationChange,
+  contacts,
+  leads,
+  pendingContact,
+  layout = "multi",
+  snapRadius = 4,
+  snapThresholdPct = 99.96,
+  showRasTags = true,
+  hollowRender = false,
+}) {
+  const canvasRef = useRef(null);
+  const nvRef = useRef(null);
+  const markerMeshRef = useRef(null);
+  const previewMeshRef = useRef(null);
+  const snapTimerRef = useRef(null);
+  const snapAbortRef = useRef(null);
+
+  const onLocationChangeRef = useRef(onLocationChange);
+  useEffect(() => {
+    onLocationChangeRef.current = onLocationChange;
+  }, [onLocationChange]);
+
+  const scanFilenameRef = useRef(scanFilename);
+  useEffect(() => {
+    scanFilenameRef.current = scanFilename;
+  }, [scanFilename]);
+
+  const snapRadiusRef = useRef(snapRadius);
+  const snapThresholdRef = useRef(snapThresholdPct);
+  useEffect(() => {
+    snapRadiusRef.current = snapRadius;
+  }, [snapRadius]);
+  useEffect(() => {
+    snapThresholdRef.current = snapThresholdPct;
+  }, [snapThresholdPct]);
+
+  // Initialise NiiVue once.
+  useEffect(() => {
+    if (nvRef.current) return;
+    const nv = new Niivue({
+      backColor: [0.05, 0.05, 0.08, 1],
+      crosshairColor: [1, 0.4, 0.4, 1],
+      show3Dcrosshair: false,
+      sliceType: 3,
+      multiplanarLayout: 2,
+      multiplanarShowRender: 1,
+      isHighResolutionCapable: false,
+      isAntiAlias: true,
+      isOrientCube: true,
+    });
+    nv.attachToCanvas(canvasRef.current);
+
+    let lastLocCall = 0;
+    nv.onLocationChange = (data) => {
+      const now = performance.now();
+      if (now - lastLocCall < 30) return;
+      lastLocCall = now;
+      if (!data?.mm) return;
+
+      const rawCoord = {
+        R: parseFloat(data.mm[0].toFixed(1)),
+        A: parseFloat(data.mm[1].toFixed(1)),
+        S: parseFloat(data.mm[2].toFixed(1)),
+        snapped: false,
+      };
+      onLocationChangeRef.current?.(rawCoord);
+
+      // Short debounce so a rapid drag doesn't slam the backend, but the
+      // snap response feels near-instant after the click settles.
+      if (snapTimerRef.current) clearTimeout(snapTimerRef.current);
+      if (snapAbortRef.current) snapAbortRef.current.abort();
+      snapTimerRef.current = setTimeout(() => {
+        runSnap(rawCoord);
+      }, 80);
+    };
+
+    nvRef.current = nv;
+
+    return () => {
+      if (snapTimerRef.current) clearTimeout(snapTimerRef.current);
+      if (snapAbortRef.current) snapAbortRef.current.abort();
+    };
+  }, []);
+
+  const runSnap = (rawCoord) => {
+    const fname = scanFilenameRef.current;
+    if (!fname) return;
+    const controller = new AbortController();
+    snapAbortRef.current = controller;
+    fetch(`${API}/api/scans/${fname}/snap`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        point_mm: [rawCoord.R, rawCoord.A, rawCoord.S],
+        radius_mm: snapRadiusRef.current,
+        threshold_pct: snapThresholdRef.current,
+        iterations: 2,
+      }),
+      signal: controller.signal,
+    })
+      .then((r) => r.json())
+      .then((res) => {
+        if (!res || !res.success) return;
+        onLocationChangeRef.current?.({
+          R: parseFloat(res.center_mm[0].toFixed(1)),
+          A: parseFloat(res.center_mm[1].toFixed(1)),
+          S: parseFloat(res.center_mm[2].toFixed(1)),
+          snapped: true,
+          voxelCount: res.voxel_count,
+          centerVoxel:
+            Array.isArray(res.center_voxel) && res.center_voxel.length === 3
+              ? res.center_voxel
+              : null,
+        });
+      })
+      .catch((err) => {
+        if (err.name === "AbortError") return;
+      });
+  };
+
+  // Load volume when filename changes.
+  useEffect(() => {
+    if (!scanFilename || !nvRef.current) return;
+    const nv = nvRef.current;
+    const url = `${API}/api/scans/${scanFilename}`;
+    nv.loadVolumes([{ url, colormap: "ct_skull" }]).then(() => {
+      nv.setVolumeRenderIllumination(0.4);
+      nv.setRenderAzimuthElevation(120, 10);
+      nv.volScaleMultiplier = 1.4;
+      nv.setSliceMM(true);
+      nv.setMeshThicknessOn2D(Infinity);
+      nv.setClipPlaneThick(0.7);
+      nv.drawScene?.();
+    });
+  }, [scanFilename]);
+
+  // Layout: switch which slice(s) NiiVue draws, and whether the 3D render
+  // pane is visible alongside the multiplanar grid.
+  useEffect(() => {
+    const nv = nvRef.current;
+    if (!nv) return;
+    const sliceType = LAYOUT_TO_SLICETYPE[layout] ?? 3;
+    nv.setSliceType(sliceType);
+    // Only show the 3D render in the 4th tile when in multiplanar mode.
+    nv.opts.multiplanarShowRender = layout === "multi" ? 1 : 0;
+    nv.drawScene?.();
+  }, [layout]);
+
+  // 3D clip plane.
+  useEffect(() => {
+    const nv = nvRef.current;
+    if (!nv || !nv.volumes || nv.volumes.length === 0) return;
+    if (clipPlane === "off" || clipDepth === undefined) {
+      nv.setClipPlane([2, 0, 0]);
+    } else {
+      const [az, el] =
+        CLIP_PLANE_ANGLES[clipPlane] || CLIP_PLANE_ANGLES.sagittal;
+      nv.setClipPlane([clipDepth, az, el]);
+    }
+  }, [clipDepth, clipPlane]);
+
+  // Threshold updates.
+  useEffect(() => {
+    const nv = nvRef.current;
+    if (!nv || !nv.volumes || nv.volumes.length === 0) return;
+    nv.volumes[0].cal_min = calMin;
+    nv.volumes[0].cal_max = calMax;
+    nv.updateGLVolume();
+  }, [calMin, calMax]);
+
+  useEffect(() => {
+    const nv = nvRef.current;
+    if (!nv) return;
+    // NiiVue exposes `opts` as read-only; use setters only (never assign nv.opts).
+    if (typeof nv.setIsOrientationTextVisible === "function") {
+      nv.setIsOrientationTextVisible(!!showRasTags);
+    }
+    if (typeof nv.setShowAllOrientationMarkers === "function") {
+      nv.setShowAllOrientationMarkers(!!showRasTags);
+    }
+    nv.drawScene?.();
+  }, [showRasTags]);
+
+  // "Hollow" / X-ray volume render so electrodes inside the skull are visible.
+  // NiiVue: a negative illumination value enables a MIP-style accumulator that
+  // shows bright voxels (electrodes) through semi-transparent bone.
+  useEffect(() => {
+    const nv = nvRef.current;
+    if (!nv) return;
+    try {
+      if (hollowRender) {
+        nv.setVolumeRenderIllumination?.(-1.0);
+      } else {
+        nv.setVolumeRenderIllumination?.(0.4);
+      }
+    } catch (e) {
+      console.warn("hollow render toggle failed", e);
+    }
+    nv.drawScene?.();
+  }, [hollowRender]);
+
+  // Committed contact markers.
+  useEffect(() => {
+    const nv = nvRef.current;
+    if (!nv || !nv.volumes || nv.volumes.length === 0) return;
+    if (markerMeshRef.current) {
+      try {
+        nv.removeMesh(markerMeshRef.current);
+      } catch (e) {}
+      markerMeshRef.current = null;
+    }
+    if (!contacts || contacts.length === 0) {
+      nv.drawScene?.();
+      return;
+    }
+    try {
+      const mesh = nv.loadConnectomeAsMesh(
+        buildContactsConnectome(contacts, leads || [])
+      );
+      nv.addMesh(mesh);
+      markerMeshRef.current = mesh;
+      nv.drawScene?.();
+    } catch (err) {
+      console.warn("contact mesh build failed", err);
+    }
+  }, [contacts, leads]);
+
+  // Pending preview marker.
+  useEffect(() => {
+    const nv = nvRef.current;
+    if (!nv || !nv.volumes || nv.volumes.length === 0) return;
+    if (previewMeshRef.current) {
+      try {
+        nv.removeMesh(previewMeshRef.current);
+      } catch (e) {}
+      previewMeshRef.current = null;
+    }
+    if (!pendingContact || !pendingContact.coord) {
+      nv.drawScene?.();
+      return;
+    }
+    try {
+      const mesh = nv.loadConnectomeAsMesh(
+        buildPreviewConnectome(pendingContact.coord, pendingContact.label)
+      );
+      nv.addMesh(mesh);
+      previewMeshRef.current = mesh;
+      nv.drawScene?.();
+    } catch (err) {
+      console.warn("preview mesh build failed", err);
+    }
+  }, [pendingContact]);
+
+  return (
+    <div className="viewer-container">
+      <canvas ref={canvasRef} />
+    </div>
+  );
+}

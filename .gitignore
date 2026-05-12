@@ -1,1 +1,13 @@
 *.pyc
+__pycache__/
+*.egg-info/
+
+# Web app
+web/frontend/node_modules/
+web/frontend/build/
+web/backend/__pycache__/
+web/backend/data/*.nii
+web/backend/data/*.nii.gz
+web/backend/annotations/*.json
+# Demo / teaching annotation (redact before any public release)
+!web/backend/annotations/example.json
