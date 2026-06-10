@@ -73,13 +73,12 @@ Use this sequence so you hit every major surface we care about.
 | 1 | **Load Scan** → pick `example.nii.gz` (or your file) | Volume loads; multiplanar NiiVue appears. |
 | 2 | **Define leads** → add at least one depth lead (e.g. 1×8), **select** it in **Label** | Sidebar matches desktop-style lead definition. |
 | 3 | **Slices** tab: move crosshair, observe **snap** (centroid) when stable | Bright-voxel snap vs raw click. |
-| 4 | Toggle **Hollow** on 3D render (if visible in layout) | Electrodes visible through semi-transparent skull. |
-| 5 | **Threshold cloud** tab: set cloud percentile / **Blob radius (mm)** → **Update** | Dense point cloud; orange blob after click. |
+| 4 | Set **CT threshold (%ile)** → **Update** (default **99.96**, same as desktop) | Applies to slices, cloud, snap, and interpolate. |
+| 5 | **Threshold cloud** tab: click **Refresh cloud** if needed after threshold change | Dense point cloud; orange blob after click. |
 | 6 | With a lead selected, **click** on an electrode in the cloud → **Submit** (or **S**) | Contact list grows; yellow pending → committed. |
-| 7 | Mark a **second** contact on the same lead, then **Interpolate** | Filled contacts; green status text mentions curved path when used. |
+| 7 | Mark a **second** contact on the same lead, then **Interpolate** | Filled contacts along straight line + legacy snap. |
 | 8 | Add a **second lead**, mark a few contacts, interpolate | **Two colors** of shaft lines in the cloud; slice view shows **connectome edges** between contacts. |
 | 9 | **Save** / **Load Coordinates** round-trip with JSON | Same format family as desktop workflow. |
-| 10 | Optional: **Exclude click** on cloud, **Clear exclusions** | Voxels removed from cloud query. |
 
 **Keyboard:** **S** submit pending contact, **Esc** cancel, **F** toggle sidebar (where implemented).
 
@@ -90,7 +89,7 @@ Use this sequence so you hit every major surface we care about.
 Short notes on any of these help us prioritize:
 
 - **Clinical / labeling:** Is snap + cloud pick trustworthy enough vs desktop picking?
-- **Interpolation:** Does curved path behavior match expectations on real anatomy?
+- **Interpolation:** Does straight-line + snap behavior match the desktop tool on real anatomy?
 - **Cognitive load:** Two tabs (slices vs cloud) — is that clearer or more confusing than one desktop window?
 - **Gaps:** What is still missing before you would assign this to a student or use it in lab?
 
@@ -107,10 +106,10 @@ This is **not** a line-by-line transcript of any single meeting; it is a concise
 | **Host** | Local Qt app, conda env `vt` | Browser UI + Flask API |
 | **Slice viewing** | Built-in slice / point cloud views | **[NiiVue](https://niivue.com/)** multiplanar + optional 3D render |
 | **3D threshold cloud** | Point cloud in desktop viewer | **Separate tab**: Three.js cloud + **per-lead polylines** (thick screen-space lines, distinct colors) |
-| **Picking** | Click CT / point cloud in-app | Slices: location + **snap** to bright centroid; Cloud: **26-connected bright blob** from seed with optional **Euclidean ball cap** (blob radius mm) |
-| **Interpolation** | Straight / established fill behavior | Same goals; server can use **curved path through bright voxels** (`interior_path`) with **diagnostics** surfaced in the UI |
-| **Exclusions** | (varies by version) | **Exclude-click** voxels from cloud threshold query for a session |
-| **Volume appearance** | Standard CT render | **“Hollow” / X-ray-style** render toggle to see electrodes inside bone |
+| **Picking** | Click CT / point cloud in-app | Slices: location + **snap** (3 mm, 99.96 %ile); Cloud: **26-connected bright blob** capped at ~6 mm from click |
+| **Interpolation** | Straight line + proximity snap (`model/interpolator.py`) | Same legacy math via `/api/scans/.../interpolate` (straight chord + 3 mm snap for depth leads) |
+| **CT threshold** | Single **99.96** percentile in desktop | One **CT threshold (%ile)** control shared across tabs |
+| **Volume appearance** | Standard CT render + window presets | NiiVue **Bone / Electrodes / Soft / Auto** + Min/Max sliders (slices tab only) |
 | **Persistence** | Save JSON from desktop | **Save / Load** via API + downloads; demo `example.json` can be tracked for teaching |
 | **Bipolar pairs** | Checkbox on save | Same concept where wired in web save payload |
 

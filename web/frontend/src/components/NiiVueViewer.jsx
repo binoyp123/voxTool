@@ -104,12 +104,6 @@ function buildPreviewConnectome(coord, label) {
   };
 }
 
-const CLIP_PLANE_ANGLES = {
-  sagittal: [270, 0],
-  coronal: [0, 0],
-  axial: [0, 90],
-};
-
 // NiiVue sliceType: 0=axial, 1=coronal, 2=sagittal, 3=multiplanar, 4=render
 const LAYOUT_TO_SLICETYPE = {
   axial: 0,
@@ -123,17 +117,14 @@ export default function NiiVueViewer({
   scanFilename,
   calMin,
   calMax,
-  clipDepth,
-  clipPlane,
   onLocationChange,
   contacts,
   leads,
   pendingContact,
   layout = "multi",
-  snapRadius = 4,
+  snapRadius = 3,
   snapThresholdPct = 99.96,
   showRasTags = true,
-  hollowRender = false,
 }) {
   const canvasRef = useRef(null);
   const nvRef = useRef(null);
@@ -172,7 +163,7 @@ export default function NiiVueViewer({
       multiplanarLayout: 2,
       multiplanarShowRender: 1,
       isHighResolutionCapable: false,
-      isAntiAlias: true,
+      isAntiAlias: false,
       isOrientCube: true,
     });
     nv.attachToCanvas(canvasRef.current);
@@ -273,26 +264,16 @@ export default function NiiVueViewer({
     nv.drawScene?.();
   }, [layout]);
 
-  // 3D clip plane.
+  // Intensity window — debounced so slider drags stay responsive.
   useEffect(() => {
     const nv = nvRef.current;
     if (!nv || !nv.volumes || nv.volumes.length === 0) return;
-    if (clipPlane === "off" || clipDepth === undefined) {
-      nv.setClipPlane([2, 0, 0]);
-    } else {
-      const [az, el] =
-        CLIP_PLANE_ANGLES[clipPlane] || CLIP_PLANE_ANGLES.sagittal;
-      nv.setClipPlane([clipDepth, az, el]);
-    }
-  }, [clipDepth, clipPlane]);
-
-  // Threshold updates.
-  useEffect(() => {
-    const nv = nvRef.current;
-    if (!nv || !nv.volumes || nv.volumes.length === 0) return;
-    nv.volumes[0].cal_min = calMin;
-    nv.volumes[0].cal_max = calMax;
-    nv.updateGLVolume();
+    const t = setTimeout(() => {
+      nv.volumes[0].cal_min = calMin;
+      nv.volumes[0].cal_max = calMax;
+      nv.updateGLVolume();
+    }, 80);
+    return () => clearTimeout(t);
   }, [calMin, calMax]);
 
   useEffect(() => {
@@ -307,24 +288,6 @@ export default function NiiVueViewer({
     }
     nv.drawScene?.();
   }, [showRasTags]);
-
-  // "Hollow" / X-ray volume render so electrodes inside the skull are visible.
-  // NiiVue: a negative illumination value enables a MIP-style accumulator that
-  // shows bright voxels (electrodes) through semi-transparent bone.
-  useEffect(() => {
-    const nv = nvRef.current;
-    if (!nv) return;
-    try {
-      if (hollowRender) {
-        nv.setVolumeRenderIllumination?.(-1.0);
-      } else {
-        nv.setVolumeRenderIllumination?.(0.4);
-      }
-    } catch (e) {
-      console.warn("hollow render toggle failed", e);
-    }
-    nv.drawScene?.();
-  }, [hollowRender]);
 
   // Committed contact markers.
   useEffect(() => {

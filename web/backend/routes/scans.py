@@ -5,6 +5,7 @@ import numpy as np
 from flask import Blueprint, send_from_directory, jsonify, current_app, request
 
 from ct_cache import get_volume
+from legacy_interpolator import interpolate_between_endpoints, lead_radius_mm
 
 scans_bp = Blueprint("scans", __name__)
 
@@ -217,7 +218,7 @@ def snap(filename):
     if not point_mm or len(point_mm) != 3:
         return jsonify({"error": "point_mm [r,a,s] is required"}), 400
 
-    radius_mm = float(body.get("radius_mm", 4.0))
+    radius_mm = float(body.get("radius_mm", 3.0))
     threshold_pct = float(body.get("threshold_pct", 99.96))
     iterations = int(body.get("iterations", 2))
 
@@ -516,6 +517,86 @@ def voxel_to_mm_endpoint(filename):
             ]
         }
     )
+
+
+@scans_bp.route("/<filename>/interpolate", methods=["POST"])
+def interpolate_contacts(filename):
+    """Legacy straight-line interpolation + proximity snap (matches desktop voxTool).
+
+    Body: {
+      start_voxel?: [i,j,k], end_voxel?: [i,j,k],
+      start_mm?: [r,a,s], end_mm?: [r,a,s],
+      low_label: int, high_label: int,
+      labels?: [int, ...],          # interior labels; default low+1 .. high-1
+      threshold_pct?: 99.96,
+      lead_type?: "D"|"G"|"S",
+      radius_mm?: float             # overrides lead_type default
+    }
+    """
+    data_dir = current_app.config["DATA_DIR"]
+    filepath = os.path.join(data_dir, filename)
+    if not os.path.isfile(filepath):
+        return jsonify({"error": f"Scan '{filename}' not found"}), 404
+
+    body = request.get_json(force=True) or {}
+    low_label = int(body.get("low_label", 0))
+    high_label = int(body.get("high_label", 0))
+    if high_label - low_label < 1:
+        return jsonify(
+            {"success": False, "error": "low_label and high_label must span at least 2 contacts"}
+        ), 400
+
+    vol = get_volume(filepath)
+    start_vox = body.get("start_voxel")
+    end_vox = body.get("end_voxel")
+    if start_vox is None or end_vox is None:
+        start_mm = body.get("start_mm")
+        end_mm = body.get("end_mm")
+        if (
+            not start_mm
+            or not end_mm
+            or len(start_mm) != 3
+            or len(end_mm) != 3
+        ):
+            return jsonify(
+                {
+                    "success": False,
+                    "error": "start_voxel/end_voxel or start_mm/end_mm required",
+                }
+            ), 400
+        start_vox = vol.mm_to_voxel(start_mm)[:3].tolist()
+        end_vox = vol.mm_to_voxel(end_mm)[:3].tolist()
+
+    labels = body.get("labels")
+    if labels is not None:
+        interior_labels = [int(x) for x in labels]
+    else:
+        interior_labels = list(range(low_label + 1, high_label))
+
+    threshold_pct = float(body.get("threshold_pct", 99.96))
+    lead_type = body.get("lead_type")
+    radius_mm = body.get("radius_mm")
+    if radius_mm is None:
+        radius_mm = lead_radius_mm(lead_type)
+    else:
+        radius_mm = float(radius_mm)
+
+    existing = body.get("existing_voxels") or []
+
+    result = interpolate_between_endpoints(
+        vol,
+        start_vox,
+        end_vox,
+        low_label,
+        high_label,
+        interior_labels,
+        threshold_pct=threshold_pct,
+        radius_mm=radius_mm,
+        existing_voxels=existing,
+    )
+    if not result.get("success"):
+        return jsonify(result), 400
+    return jsonify(result)
 
 
 @scans_bp.route("/<filename>/interior_path", methods=["POST"])

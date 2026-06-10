@@ -1,15 +1,9 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 
 const PRESETS = [
   { id: "bone", label: "Bone", min: 300, max: 1500 },
   { id: "electrodes", label: "Electrodes", min: 1500, max: 3500 },
   { id: "soft", label: "Soft", min: -100, max: 200 },
-];
-
-const CLIP_PLANES = [
-  { id: "sagittal", label: "Sagittal" },
-  { id: "coronal", label: "Coronal" },
-  { id: "axial", label: "Axial" },
 ];
 
 const LAYOUTS = [
@@ -24,32 +18,37 @@ export default function Toolbar({
   scanFilename,
   calMin,
   calMax,
-  onCalMinChange,
-  onCalMaxChange,
   onWindowChange,
-  clipDepth,
-  clipPlane,
-  onClipDepthChange,
-  onClipPlaneChange,
   viewerLayout,
   onViewerLayoutChange,
   sidebarCollapsed,
   onToggleSidebar,
-  hollowRender,
-  onToggleHollowRender,
-  disabled = false,
 }) {
   const [autoLoading, setAutoLoading] = useState(false);
+  const [localMin, setLocalMin] = useState(calMin);
+  const [localMax, setLocalMax] = useState(calMax);
+  const debounceRef = useRef(null);
 
-  const nvDisabled = disabled || !scanFilename;
+  useEffect(() => {
+    setLocalMin(calMin);
+    setLocalMax(calMax);
+  }, [calMin, calMax]);
+
+  const nvDisabled = !scanFilename;
+
+  const pushWindow = (min, max) => {
+    if (!onWindowChange) return;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      onWindowChange(min, max);
+    }, 100);
+  };
 
   const applyPreset = (preset) => {
-    if (onWindowChange) {
-      onWindowChange(preset.min, preset.max);
-    } else {
-      onCalMinChange(preset.min);
-      onCalMaxChange(preset.max);
-    }
+    setLocalMin(preset.min);
+    setLocalMax(preset.max);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    onWindowChange?.(preset.min, preset.max);
   };
 
   const applyAuto = async () => {
@@ -61,12 +60,9 @@ export default function Toolbar({
       const data = await res.json();
       const min = Math.round(data.p1);
       const max = Math.round(data.p99);
-      if (onWindowChange) {
-        onWindowChange(min, max);
-      } else {
-        onCalMinChange(min);
-        onCalMaxChange(max);
-      }
+      setLocalMin(min);
+      setLocalMax(max);
+      onWindowChange?.(min, max);
     } catch (err) {
       console.error("applyAuto:", err);
       alert("Auto windowing failed.");
@@ -138,11 +134,15 @@ export default function Toolbar({
           type="range"
           min={-200}
           max={2000}
-          value={calMin}
-          onChange={(e) => onCalMinChange(Number(e.target.value))}
+          value={localMin}
+          onChange={(e) => {
+            const v = Number(e.target.value);
+            setLocalMin(v);
+            pushWindow(v, localMax);
+          }}
           disabled={nvDisabled}
         />
-        <span className="threshold-value">{calMin}</span>
+        <span className="threshold-value">{localMin}</span>
       </label>
 
       <label className="toolbar-slider">
@@ -151,48 +151,15 @@ export default function Toolbar({
           type="range"
           min={0}
           max={5000}
-          value={calMax}
-          onChange={(e) => onCalMaxChange(Number(e.target.value))}
+          value={localMax}
+          onChange={(e) => {
+            const v = Number(e.target.value);
+            setLocalMax(v);
+            pushWindow(localMin, v);
+          }}
           disabled={nvDisabled}
         />
-        <span className="threshold-value">{calMax}</span>
-      </label>
-
-      <button
-        type="button"
-        className={`btn btn-compact ${hollowRender ? "btn-primary" : ""}`}
-        onClick={onToggleHollowRender}
-        disabled={nvDisabled}
-        title="Hollow / X-ray look on the 3D render so contacts inside the skull are visible (uses NiiVue MIP-style rendering)."
-      >
-        Hollow
-      </button>
-
-      <label className="toolbar-clip" title="Slice the 3D render">
-        3D clip
-        <select
-          value={clipPlane}
-          onChange={(e) => onClipPlaneChange(e.target.value)}
-          disabled={nvDisabled}
-        >
-          <option value="off">Off</option>
-          {CLIP_PLANES.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.label}
-            </option>
-          ))}
-        </select>
-        <input
-          type="range"
-          min={-100}
-          max={100}
-          value={Math.round(clipDepth * 100)}
-          onChange={(e) => onClipDepthChange(Number(e.target.value) / 100)}
-          disabled={clipPlane === "off" || nvDisabled}
-        />
-        <span className="threshold-value">
-          {clipPlane === "off" ? "—" : clipDepth.toFixed(2)}
-        </span>
+        <span className="threshold-value">{localMax}</span>
       </label>
     </div>
   );

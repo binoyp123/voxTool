@@ -33,16 +33,12 @@ function contactLabelSortKey(label) {
   return m ? parseInt(m[0], 10) : NaN;
 }
 
+/** Pick radius (mm) — matches legacy depth lead radius in config.yml. */
+const PICK_BALL_MM = 3;
+
 export default function ThresholdCloudViewer({
   scanFilename,
   cloudThresholdPct,
-  componentMaxBallMm = 6,
-  excludedVoxels,
-  onExcludedAdd,
-  excludeClickMode,
-  onExcludeModeChange,
-  onClearExcluded,
-  excludedCount,
   onCloudVoxelPick,
   contacts,
   leads,
@@ -58,14 +54,10 @@ export default function ThresholdCloudViewer({
   const pickIndexToVoxelRef = useRef(null);
   const animationRef = useRef(null);
   const spacingRef = useRef([1, 1, 1]);
-  const excludeModeRef = useRef(false);
   const selectedLeadRef = useRef("");
-  const onExcludedRef = useRef(null);
   const onCloudPickRef = useRef(null);
   const scanFilenameRef = useRef(null);
-  const cloudThresholdPctRef = useRef(99.5);
-  const componentMaxBallMmRef = useRef(6);
-  const excludedVoxelsRef = useRef([]);
+  const cloudThresholdPctRef = useRef(99.96);
   const pickGenerationRef = useRef(0);
   /** LineMaterials need `resolution` updates on resize (screen-space linewidth). */
   const fatLineMaterialsRef = useRef([]);
@@ -77,21 +69,8 @@ export default function ThresholdCloudViewer({
     cloudThresholdPctRef.current = cloudThresholdPct;
   }, [cloudThresholdPct]);
   useEffect(() => {
-    componentMaxBallMmRef.current = componentMaxBallMm;
-  }, [componentMaxBallMm]);
-  useEffect(() => {
-    excludedVoxelsRef.current = excludedVoxels;
-  }, [excludedVoxels]);
-
-  useEffect(() => {
-    excludeModeRef.current = excludeClickMode;
-  }, [excludeClickMode]);
-  useEffect(() => {
     selectedLeadRef.current = selectedLead;
   }, [selectedLead]);
-  useEffect(() => {
-    onExcludedRef.current = onExcludedAdd;
-  }, [onExcludedAdd]);
   useEffect(() => {
     onCloudPickRef.current = onCloudVoxelPick;
   }, [onCloudVoxelPick]);
@@ -121,7 +100,6 @@ export default function ThresholdCloudViewer({
           threshold_pct: cloudThresholdPct,
           max_points: 400000,
           seed: 0,
-          excluded_voxels: excludedVoxels,
         }),
       });
       if (!res.ok) {
@@ -148,7 +126,7 @@ export default function ThresholdCloudViewer({
     } finally {
       setLoading(false);
     }
-  }, [scanFilename, cloudThresholdPct, excludedVoxels]);
+  }, [scanFilename, cloudThresholdPct]);
 
   const rebuildPoints = (points, spacing) => {
     const scene = sceneRef.current;
@@ -300,10 +278,6 @@ export default function ThresholdCloudViewer({
       if (ix === null || ix < 0 || ix >= pickMap.length) return;
       const seedVoxel = pickMap[ix];
 
-      if (excludeModeRef.current) {
-        onExcludedRef.current?.(seedVoxel);
-        return;
-      }
       if (!selectedLeadRef.current || !onCloudPickRef.current) return;
 
       const fname = scanFilenameRef.current;
@@ -320,9 +294,8 @@ export default function ThresholdCloudViewer({
             body: JSON.stringify({
               seed_voxel: seedVoxel,
               threshold_pct: cloudThresholdPctRef.current,
-              excluded_voxels: excludedVoxelsRef.current,
               max_voxels: 12000,
-              max_ball_mm: componentMaxBallMmRef.current,
+              max_ball_mm: PICK_BALL_MM,
             }),
           });
           const data = await res.json();
@@ -628,36 +601,15 @@ export default function ThresholdCloudViewer({
               ? `${meta.returned.toLocaleString()} pts displayed · ${meta.total.toLocaleString()} above threshold · thr=${meta.thr?.toFixed(1) ?? "—"}${pickBusy ? " · blob…" : ""}`
               : "—"}
         </span>
-        <span className="cloud-toolbar-actions">
-          <label className="cloud-exclude-label">
-            <input
-              type="checkbox"
-              checked={excludeClickMode}
-              onChange={(e) => onExcludeModeChange?.(e.target.checked)}
-            />
-            Exclude click
-          </label>
-          <button
-            type="button"
-            className="btn btn-compact"
-            onClick={onClearExcluded}
-            disabled={!excludedCount}
-            title="Remove all excluded voxels for this scan"
-          >
-            Clear exclusions ({excludedCount})
-          </button>
-          <button type="button" className="btn btn-compact" onClick={fetchCloud} disabled={loading}>
-            Refresh
-          </button>
-        </span>
+        <button type="button" className="btn btn-compact" onClick={fetchCloud} disabled={loading}>
+          Refresh cloud
+        </button>
       </div>
       {error && <div className="cloud-error">{error}</div>}
       <div className="cloud-hint muted">
-        {excludeClickMode
-          ? "Click a point to hide that voxel from the cloud."
-          : selectedLead
-            ? "Click the electrode — orange = bright voxels within the blob radius around your click; yellow = centroid (Submit)."
-            : "Select a lead in the sidebar, then click the cloud."}
+        {selectedLead
+          ? "Click an electrode contact — orange = nearby bright voxels; yellow = centroid (S or Submit)."
+          : "Select a lead in the sidebar, then click the cloud."}
       </div>
       <div ref={wrapRef} className="cloud-canvas-wrap" />
     </div>

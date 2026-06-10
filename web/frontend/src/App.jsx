@@ -7,10 +7,6 @@ import ThresholdCloudViewer from "./components/ThresholdCloudViewer";
 
 const API = process.env.REACT_APP_API_URL || "";
 
-function voxelKey(v) {
-  return `${v[0]},${v[1]},${v[2]}`;
-}
-
 /** Euclidean distance in mm (RAS). */
 function distMm(p, q) {
   const dR = p.R - q.R;
@@ -56,8 +52,6 @@ export default function App() {
   const [scanFilename, setScanFilename] = useState(null);
   const [calMin, setCalMin] = useState(300);
   const [calMax, setCalMax] = useState(1500);
-  const [clipDepth, setClipDepth] = useState(0);
-  const [clipPlane, setClipPlane] = useState("off");
   const [leads, setLeads] = useState([]);
   const [selectedLead, setSelectedLead] = useState("");
   const [contacts, setContacts] = useState([]);
@@ -76,16 +70,9 @@ export default function App() {
   const [scanList, setScanList] = useState([]);
   const [pickerSelected, setPickerSelected] = useState("");
   const [saving, setSaving] = useState(false);
-  const [hollowRender, setHollowRender] = useState(false);
   // {tone: 'ok'|'warn'|'err', text: string} — shows under the Interpolate button.
   const [interpStatus, setInterpStatus] = useState(null);
   const [viewerTab, setViewerTab] = useState("slices");
-  const [cloudThresholdPct, setCloudThresholdPct] = useState(99.5);
-  const [cloudThresholdInput, setCloudThresholdInput] = useState("99.5");
-  const [componentBallMm, setComponentBallMm] = useState(6);
-  const [componentBallInput, setComponentBallInput] = useState("6");
-  const [excludedVoxels, setExcludedVoxels] = useState([]);
-  const [excludeClickMode, setExcludeClickMode] = useState(false);
 
   const nextLabel = useMemo(
     () => nextLabelForLead(selectedLead, contacts),
@@ -96,10 +83,6 @@ export default function App() {
     setContactIndexInput(nextLabel);
   }, [selectedLead, nextLabel]);
 
-  useEffect(() => {
-    setExcludedVoxels([]);
-    setExcludeClickMode(false);
-  }, [scanFilename]);
 
   const openScanPicker = useCallback(async () => {
     try {
@@ -130,40 +113,6 @@ export default function App() {
       alert("CT threshold must be a percentile between 0 and 100 (e.g. 99.96).");
     }
   }, [thresholdInput]);
-
-  const applyCloudThreshold = useCallback(() => {
-    const v = parseFloat(String(cloudThresholdInput).replace(",", "."));
-    if (Number.isFinite(v) && v > 0 && v <= 100) {
-      setCloudThresholdPct(v);
-      setCloudThresholdInput(String(v));
-    } else {
-      alert("Cloud percentile must be between 0 and 100 (e.g. 99.5).");
-    }
-  }, [cloudThresholdInput]);
-
-  const applyComponentBall = useCallback(() => {
-    const v = parseFloat(String(componentBallInput).replace(",", "."));
-    if (Number.isFinite(v) && v >= 0 && v <= 50) {
-      setComponentBallMm(v);
-      setComponentBallInput(String(v));
-    } else {
-      alert("Blob radius must be between 0 and 50 mm (0 = no limit, default 6).");
-    }
-  }, [componentBallInput]);
-
-  const handleExcludedAdd = useCallback((voxel) => {
-    setExcludedVoxels((prev) => {
-      const k = voxelKey(voxel);
-      if (prev.some((x) => voxelKey(x) === k)) return prev;
-      return [...prev, [voxel[0], voxel[1], voxel[2]]];
-    });
-  }, []);
-
-  const handleClearExcluded = useCallback(() => {
-    if (excludedVoxels.length === 0) return;
-    if (!window.confirm(`Clear ${excludedVoxels.length} excluded voxel(s)?`)) return;
-    setExcludedVoxels([]);
-  }, [excludedVoxels.length]);
 
   const handleCloudVoxelPick = useCallback(
     async (pick) => {
@@ -199,7 +148,7 @@ export default function App() {
         }
         if (pick.capped) {
           console.warn(
-            "Bright blob hit max_voxels cap — centroid may be biased; lower cloud %ile or exclude skull clutter."
+            "Bright blob hit max_voxels cap — centroid may be biased; try a higher CT threshold %ile."
           );
         }
       } catch (e) {
@@ -306,19 +255,13 @@ export default function App() {
   }, []);
 
   const cleanScan = useCallback(() => {
-    if (contacts.length === 0 && !pendingContact && excludedVoxels.length === 0)
-      return;
-    if (
-      !window.confirm(
-        "Remove all contacts, clear pending marker, and reset excluded voxels for this session?"
-      )
-    ) {
+    if (contacts.length === 0 && !pendingContact) return;
+    if (!window.confirm("Remove all contacts and clear the pending marker?")) {
       return;
     }
     setContacts([]);
     setPendingContact(null);
-    setExcludedVoxels([]);
-  }, [contacts.length, pendingContact, excludedVoxels.length]);
+  }, [contacts.length, pendingContact]);
 
   const saveAnnotations = useCallback(async () => {
     if (!scanFilename) return;
@@ -329,7 +272,6 @@ export default function App() {
       scan_id: scanId,
       scan_filename: scanFilename,
       include_bipolar_pairs: includeBipolarPairs,
-      excluded_voxels: excludedVoxels,
       leads: leads.map((l) => ({
         name: l.name,
         type: l.type,
@@ -361,16 +303,16 @@ export default function App() {
       alert("Failed to save annotations.");
     }
     setSaving(false);
-  }, [scanFilename, leads, contacts, includeBipolarPairs, excludedVoxels]);
+  }, [scanFilename, leads, contacts, includeBipolarPairs]);
 
   const loadAnnotations = useCallback(async () => {
     if (!scanFilename) return;
     const scanId = scanFilename.replace(/\.nii(\.gz)?$/, "");
 
-    if (contacts.length > 0 || leads.length > 0 || excludedVoxels.length > 0) {
+    if (contacts.length > 0 || leads.length > 0) {
       const ok = window.confirm(
-        `This will replace your current ${leads.length} lead(s), ${contacts.length} contact(s), ` +
-          `and ${excludedVoxels.length} excluded voxel(s) with the saved annotations for ${scanId}. Continue?`
+        `This will replace your current ${leads.length} lead(s) and ${contacts.length} contact(s) ` +
+          `with the saved annotations for ${scanId}. Continue?`
       );
       if (!ok) return;
     }
@@ -392,8 +334,6 @@ export default function App() {
         type: l.type,
         dimensions: l.dimensions,
       }));
-      setExcludedVoxels(latest.excluded_voxels || []);
-
       const rawContacts = latest.contacts || [];
       const newContacts = [];
       for (const c of rawContacts) {
@@ -463,7 +403,7 @@ export default function App() {
       console.error("loadAnnotations failed:", err);
       alert(`Failed to load annotations: ${err.message || err}`);
     }
-  }, [scanFilename, contacts.length, leads.length, selectedLead, excludedVoxels.length]);
+  }, [scanFilename, contacts.length, leads.length, selectedLead]);
 
   useEffect(() => {
     const handler = (e) => {
@@ -647,159 +587,123 @@ export default function App() {
 
     targets.sort((x, y) => x.n - y.n);
 
-    // Curved leads: straight RAS chords leave the skull. Prefer a bright-voxel path (server A*).
-    let pathDiag = null;
-    let pathFailMsg = null;
-    if (span >= 2 && targets.length > 0) {
-      try {
-        const res = await fetch(
-          `${API}/api/scans/${scanFilename}/interior_path`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              start_mm: [low.coord.R, low.coord.A, low.coord.S],
-              end_mm: [high.coord.R, high.coord.A, high.coord.S],
-              low_label: low.n,
-              high_label: high.n,
-              labels: targets.map((t) => t.n),
-              threshold_pct: thresholdPct,
-            }),
-          }
-        );
-        const pdata = await res.json();
-        pathDiag = pdata?.diagnostics || null;
-        if (pdata.success && Array.isArray(pdata.interior)) {
-          const byLabel = Object.fromEntries(
-            pdata.interior.map((x) => [String(x.label), x.mm])
-          );
-          for (const t of targets) {
-            const mm = byLabel[String(t.n)];
-            if (mm?.length === 3) {
-              t.guess = { R: mm[0], A: mm[1], S: mm[2] };
-              t.fromPath = true;
-            }
-          }
-        } else if (pdata && !pdata.success) {
-          pathFailMsg = pdata.message || pdata.error || "interior_path failed";
-          console.warn("interior_path skipped:", pdata);
-        }
-      } catch (e) {
-        pathFailMsg = `interior_path request error: ${e.message || e}`;
-        console.error("interior_path:", e);
-      }
-    }
-
-    // Lead axis from the two submitted anchors (loose guard for non-path snaps).
-    const lineA = low.coord;
-    const lineB = high.coord;
+    const leadRadiusMm = { D: 3, G: 3, S: 5 }[lead?.type] ?? 3;
+    const existingVoxels = leadContacts
+      .map((c) => c.voxel)
+      .filter((v) => Array.isArray(v) && v.length === 3);
 
     setInterpolating(true);
     const newOnes = [];
-    let snapAdjusted = 0;
+    let snappedCount = 0;
+    let interpFailMsg = null;
     try {
-      const maxDrift = 5;
-      // Real depth leads can curve ~3–4mm off the chord between contacts 1 and 8;
-      // a tight off-line gate kept rejecting good candidates and we ended up with
-      // a perfect chord. Loosen and rely on drift + voxel_count instead.
-      const maxOffLine = 6;
-      const minVoxels = 6;
+      if (span >= 2) {
+        const body = {
+          low_label: low.n,
+          high_label: high.n,
+          labels: targets.map((t) => t.n),
+          threshold_pct: thresholdPct,
+          lead_type: lead.type,
+          existing_voxels: existingVoxels,
+        };
+        if (low.voxel?.length === 3 && high.voxel?.length === 3) {
+          body.start_voxel = low.voxel;
+          body.end_voxel = high.voxel;
+        } else {
+          body.start_mm = [low.coord.R, low.coord.A, low.coord.S];
+          body.end_mm = [high.coord.R, high.coord.A, high.coord.S];
+        }
 
-      for (const t of targets) {
-        const { n, guess, fromPath } = t;
-        let out = { ...guess };
-        let voxelOut = null;
-
-        if (!fromPath) {
+        const res = await fetch(`${API}/api/scans/${scanFilename}/interpolate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (data.success && Array.isArray(data.interior)) {
+          for (const item of data.interior) {
+            if (!item.mm || item.mm.length !== 3) continue;
+            if (item.snapped) snappedCount++;
+            newOnes.push({
+              lead: selectedLead,
+              label: String(item.label),
+              coord: {
+                R: parseFloat(item.mm[0].toFixed(1)),
+                A: parseFloat(item.mm[1].toFixed(1)),
+                S: parseFloat(item.mm[2].toFixed(1)),
+              },
+              voxel: item.voxel?.length === 3 ? [...item.voxel] : null,
+            });
+          }
+        } else {
+          interpFailMsg = data.error || data.message || "interpolate failed";
+          console.warn("interpolate:", data);
+        }
+      } else {
+        // Consecutive labels (e.g. 1 & 2): extrapolate spacing with legacy snap radius.
+        for (const t of targets) {
+          const { n, guess } = t;
+          let out = { ...guess };
+          let voxelOut = null;
           try {
             const res = await fetch(`${API}/api/scans/${scanFilename}/snap`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 point_mm: [guess.R, guess.A, guess.S],
-                radius_mm: 2.5,
+                radius_mm: leadRadiusMm,
                 threshold_pct: thresholdPct,
-                iterations: 1,
+                iterations: 4,
               }),
             });
-            const data = await res.json();
-            if (data.success && (data.voxel_count ?? 0) >= minVoxels) {
-              const cand = {
-                R: parseFloat(data.center_mm[0].toFixed(1)),
-                A: parseFloat(data.center_mm[1].toFixed(1)),
-                S: parseFloat(data.center_mm[2].toFixed(1)),
+            const snap = await res.json();
+            if (snap.success && (snap.voxel_count ?? 0) > 0) {
+              out = {
+                R: parseFloat(snap.center_mm[0].toFixed(1)),
+                A: parseFloat(snap.center_mm[1].toFixed(1)),
+                S: parseFloat(snap.center_mm[2].toFixed(1)),
               };
-              const drift = distMm(cand, guess);
-              const offLine = distPointToLineMm(cand, lineA, lineB);
-              if (drift <= maxDrift && offLine <= maxOffLine) {
-                out = cand;
-                snapAdjusted++;
-              }
-              if (Array.isArray(data.center_voxel) && data.center_voxel.length === 3) {
-                voxelOut = [
-                  data.center_voxel[0],
-                  data.center_voxel[1],
-                  data.center_voxel[2],
-                ];
+              snappedCount++;
+              if (snap.center_voxel?.length === 3) {
+                voxelOut = [...snap.center_voxel];
               }
             }
           } catch {
             /* keep linear guess */
           }
-        }
-
-        if (!voxelOut) {
-          try {
-            const res = await fetch(`${API}/api/scans/${scanFilename}/mm_to_voxel`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                point_mm: [out.R, out.A, out.S],
-              }),
-            });
-            const d = await res.json();
-            if (d.voxel) voxelOut = d.voxel;
-          } catch {
-            /* optional */
+          if (!voxelOut) {
+            try {
+              const res = await fetch(`${API}/api/scans/${scanFilename}/mm_to_voxel`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ point_mm: [out.R, out.A, out.S] }),
+              });
+              const d = await res.json();
+              if (d.voxel) voxelOut = d.voxel;
+            } catch {
+              /* optional */
+            }
           }
+          newOnes.push({
+            lead: selectedLead,
+            label: String(n),
+            coord: out,
+            voxel: voxelOut,
+          });
         }
-
-        newOnes.push({
-          lead: selectedLead,
-          label: String(n),
-          coord: {
-            R: parseFloat(out.R.toFixed(1)),
-            A: parseFloat(out.A.toFixed(1)),
-            S: parseFloat(out.S.toFixed(1)),
-          },
-          voxel: voxelOut,
-        });
       }
+
       if (newOnes.length > 0) {
         setContacts((prev) => [...prev, ...newOnes]);
-      }
-
-      const fromPathCount = targets.filter((t) => t.fromPath).length;
-      if (fromPathCount > 0 && pathDiag?.selected) {
-        const sel = pathDiag.selected;
         setInterpStatus({
           tone: "ok",
           text:
-            `Curved path used for ${fromPathCount}/${newOnes.length} contacts ` +
-            `(threshold ${sel.threshold_pct}%ile · dilate ${sel.dilate} · ` +
-            `arc ${sel.arc_mm}mm · endpoints ${sel.start_dist_mm}/${sel.goal_dist_mm}mm off bright voxels).`,
-        });
-      } else if (newOnes.length > 0) {
-        const reason = pathFailMsg
-          ? ` Curved path skipped: ${pathFailMsg}`
-          : "";
-        setInterpStatus({
-          tone: "warn",
-          text:
             `Filled ${newOnes.length} contact${newOnes.length === 1 ? "" : "s"} ` +
-            `from straight chord (snap improved ${snapAdjusted}).` +
-            reason,
+            `along straight line (legacy snap, ${leadRadiusMm} mm radius, ` +
+            `${snappedCount} snapped to bright voxels).`,
         });
+      } else if (interpFailMsg) {
+        setInterpStatus({ tone: "err", text: interpFailMsg });
       }
     } finally {
       setInterpolating(false);
@@ -861,84 +765,37 @@ export default function App() {
               Threshold cloud
             </button>
           </div>
-          {viewerTab === "slices" ? (
-            <div className="ct-threshold-row">
-              <span className="ct-threshold-label">Snap threshold (%ile)</span>
-              <input
-                type="text"
-                className="ct-threshold-input"
-                value={thresholdInput}
-                onChange={(e) => setThresholdInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && applyThreshold()}
-                title="Percentile for slice snap / interpolation path"
-              />
-              <button type="button" className="btn btn-compact" onClick={applyThreshold}>
-                Update
-              </button>
-            </div>
-          ) : (
-            <>
-              <div className="ct-threshold-row">
-                <span className="ct-threshold-label">Cloud percentile (%ile)</span>
-                <input
-                  type="text"
-                  className="ct-threshold-input"
-                  value={cloudThresholdInput}
-                  onChange={(e) => setCloudThresholdInput(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && applyCloudThreshold()}
-                  title="Percentile for sparse 3D cloud tab (often slightly lower than snap)"
-                />
-                <button type="button" className="btn btn-compact" onClick={applyCloudThreshold}>
-                  Update
-                </button>
-                <span className="muted" style={{ fontSize: 11 }}>
-                  Excluded voxels: {excludedVoxels.length}
-                </span>
-              </div>
-              <div className="ct-threshold-row cloud-second-row">
-                <span className="ct-threshold-label">Blob radius (mm)</span>
-                <input
-                  type="text"
-                  className="ct-threshold-input"
-                  value={componentBallInput}
-                  onChange={(e) => setComponentBallInput(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && applyComponentBall()}
-                  title="Only voxels within this Euclidean distance (mm) of your click are included in the orange blob. Default 6 ≈ one contact. Use 0 for no limit (full fused component)."
-                  style={{ width: 56 }}
-                />
-                <button type="button" className="btn btn-compact" onClick={applyComponentBall}>
-                  Update
-                </button>
-                <span className="muted" style={{ fontSize: 11 }}>
-                  Active: {componentBallMm === 0 ? "none (full connectivity)" : `${componentBallMm} mm`}
-                </span>
-              </div>
-            </>
-          )}
+          <div className="ct-threshold-row">
+            <span className="ct-threshold-label">CT threshold (%ile)</span>
+            <input
+              type="text"
+              className="ct-threshold-input"
+              value={thresholdInput}
+              onChange={(e) => setThresholdInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && applyThreshold()}
+              title="Percentile for bright-voxel display, snap, cloud pick, and interpolation (default 99.96)"
+            />
+            <button type="button" className="btn btn-compact" onClick={applyThreshold}>
+              Update
+            </button>
+          </div>
         </div>
 
-        <Toolbar
-          scanFilename={scanFilename}
-          calMin={calMin}
-          calMax={calMax}
-          onCalMinChange={setCalMin}
-          onCalMaxChange={setCalMax}
-          onWindowChange={(min, max) => {
-            setCalMin(min);
-            setCalMax(max);
-          }}
-          clipDepth={clipDepth}
-          clipPlane={clipPlane}
-          onClipDepthChange={setClipDepth}
-          onClipPlaneChange={setClipPlane}
-          viewerLayout={viewerLayout}
-          onViewerLayoutChange={setViewerLayout}
-          sidebarCollapsed={sidebarCollapsed}
-          onToggleSidebar={() => setSidebarCollapsed((c) => !c)}
-          hollowRender={hollowRender}
-          onToggleHollowRender={() => setHollowRender((h) => !h)}
-          disabled={viewerTab === "cloud"}
-        />
+        {viewerTab === "slices" && (
+          <Toolbar
+            scanFilename={scanFilename}
+            calMin={calMin}
+            calMax={calMax}
+            onWindowChange={(min, max) => {
+              setCalMin(min);
+              setCalMax(max);
+            }}
+            viewerLayout={viewerLayout}
+            onViewerLayoutChange={setViewerLayout}
+            sidebarCollapsed={sidebarCollapsed}
+            onToggleSidebar={() => setSidebarCollapsed((c) => !c)}
+          />
+        )}
 
         {scanFilename ? (
           viewerTab === "slices" ? (
@@ -946,28 +803,19 @@ export default function App() {
               scanFilename={scanFilename}
               calMin={calMin}
               calMax={calMax}
-              clipDepth={clipDepth}
-              clipPlane={clipPlane}
               onLocationChange={handleLocationChange}
               contacts={contacts}
               leads={leads}
               pendingContact={pendingContact}
               layout={viewerLayout}
+              snapRadius={3}
               snapThresholdPct={thresholdPct}
               showRasTags={showRasTags}
-              hollowRender={hollowRender}
             />
           ) : (
             <ThresholdCloudViewer
               scanFilename={scanFilename}
-              cloudThresholdPct={cloudThresholdPct}
-              componentMaxBallMm={componentBallMm}
-              excludedVoxels={excludedVoxels}
-              onExcludedAdd={handleExcludedAdd}
-              excludeClickMode={excludeClickMode}
-              onExcludeModeChange={setExcludeClickMode}
-              onClearExcluded={handleClearExcluded}
-              excludedCount={excludedVoxels.length}
+              cloudThresholdPct={thresholdPct}
               onCloudVoxelPick={handleCloudVoxelPick}
               contacts={contacts}
               leads={leads}

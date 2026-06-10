@@ -213,7 +213,7 @@ export default function ControlPanel({
           disabled={!scanLoaded || !canInterpolate || interpolating}
           title={
             canInterpolate
-              ? "Between two endpoint labels (e.g. 1 & 8), the server walks bright voxels along the CT (curved path), then places missing indices. If that fails, falls back to a straight line + snap. Consecutive 1 & 2 still extends by spacing to 3…N."
+              ? "Between two endpoint labels (e.g. 1 & 12), places missing contacts evenly along the straight line between them, then snaps each to nearby bright voxels (legacy voxTool math). Consecutive 1 & 2 still extends by spacing to 3…N."
               : "Mark at least two contacts on this lead."
           }
         >
