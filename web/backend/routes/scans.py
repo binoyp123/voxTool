@@ -299,21 +299,35 @@ def _voxel_spacing_mm(affine: np.ndarray) -> list:
     ]
 
 
-def _percentile_thr_sampled(data: np.ndarray, pct: float) -> float:
-    """Percentile on a strided sample — avoids sorting the full volume."""
-    flat = data.ravel()
-    step = max(1, flat.size // 2_000_000)
-    return float(np.percentile(flat[::step], pct))
+def _percentile_thr_from_dataobj(dataobj, nz: int, pct: float, seed: int = 0) -> float:
+    """Percentile from z-slab samples — never loads the full volume into RAM."""
+    target = 2_000_000
+    nz = int(nz)
+    slices_to_sample = min(nz, 80)
+    rng = np.random.default_rng(seed)
+    ks = (
+        rng.choice(nz, size=slices_to_sample, replace=False)
+        if nz > slices_to_sample
+        else np.arange(nz)
+    )
+    chunks: list[np.ndarray] = []
+    per_slice = max(1, target // len(ks))
+    for k in ks:
+        slab = np.asarray(dataobj[:, :, int(k)], dtype=np.float32).ravel()
+        step = max(1, slab.size // per_slice)
+        chunks.append(slab[::step])
+    return float(np.percentile(np.concatenate(chunks), pct))
 
 
-def _indices_above_thr_slicewise(
-    data: np.ndarray, thr: float, excluded: set | None
+def _indices_above_thr_from_dataobj(
+    dataobj, nz: int, thr: float, excluded: set | None
 ) -> tuple[np.ndarray, int]:
     """Collect super-threshold voxel indices one z-slab at a time (low peak RAM)."""
     chunks: list[np.ndarray] = []
     total = 0
-    for k in range(int(data.shape[2])):
-        ij = np.argwhere(data[:, :, k] >= thr)
+    for k in range(int(nz)):
+        slab = np.asarray(dataobj[:, :, k], dtype=np.float32)
+        ij = np.argwhere(slab >= thr)
         if ij.size == 0:
             continue
         pts = np.empty((len(ij), 3), dtype=np.int32)
@@ -360,16 +374,18 @@ def threshold_cloud(filename):
     if not (0 < threshold_pct <= 100):
         return jsonify({"error": "threshold_pct must be in (0, 100]"}), 400
 
-    # Load without the global volume cache — keeps peak RAM low on Render free tier.
+    # Read slices via dataobj — never materialize the full volume (Render free tier ~512MB).
     img = nib.load(filepath)
-    data = np.asarray(img.get_fdata(), dtype=np.float32).squeeze()
+    dataobj = img.dataobj
+    if dataobj.ndim == 4 and dataobj.shape[3] == 1:
+        dataobj = dataobj[:, :, :, 0]
     affine = img.affine.astype(np.float64)
-    shape = [int(x) for x in data.shape]
+    shape = [int(x) for x in dataobj.shape[:3]]
+    nz = shape[2]
 
-    thr = _percentile_thr_sampled(data, threshold_pct)
+    thr = _percentile_thr_from_dataobj(dataobj, nz, threshold_pct, seed=seed)
     ex = _excluded_set(excluded)
-    idx, total = _indices_above_thr_slicewise(data, thr, ex if ex else None)
-    del data
+    idx, total = _indices_above_thr_from_dataobj(dataobj, nz, thr, ex if ex else None)
 
     if total == 0:
         return jsonify(
