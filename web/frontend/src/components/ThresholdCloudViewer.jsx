@@ -104,6 +104,36 @@ export default function ThresholdCloudViewer({
         () => {}
       );
 
+      // After upload, the API builds the cloud cache in the background (~2 min).
+      await fetch(`${API}/api/scans/${scanFilename}/warm_cloud`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ threshold_pct: cloudThresholdPct }),
+        signal: AbortSignal.timeout(30_000),
+      }).catch(() => {});
+
+      let cacheReady = false;
+      for (let attempt = 0; attempt < 40; attempt++) {
+        const readyRes = await fetch(
+          `${API}/api/scans/${scanFilename}/cloud_ready?threshold_pct=${cloudThresholdPct}`,
+          { signal: AbortSignal.timeout(30_000) }
+        ).catch(() => null);
+        if (readyRes?.ok) {
+          const readyData = await readyRes.json().catch(() => ({}));
+          if (readyData.ready) {
+            cacheReady = true;
+            break;
+          }
+        }
+        if (attempt === 0) {
+          setError("Building cloud preview (first time may take 2–3 minutes)…");
+        }
+        await new Promise((r) => setTimeout(r, 5000));
+      }
+      if (!cacheReady) {
+        setError(null);
+      }
+
       const res = await fetch(`${API}/api/scans/${scanFilename}/threshold_cloud`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -112,7 +142,7 @@ export default function ThresholdCloudViewer({
           max_points: 400000,
           seed: 0,
         }),
-        signal: AbortSignal.timeout(300_000),
+        signal: AbortSignal.timeout(cacheReady ? 60_000 : 300_000),
       });
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));

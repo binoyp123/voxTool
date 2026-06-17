@@ -1,6 +1,7 @@
 import heapq
 import json
 import os
+import threading
 
 import numpy as np
 from flask import Blueprint, send_from_directory, jsonify, current_app, request
@@ -209,19 +210,14 @@ def upload_scan():
     upload.save(dest)
     size_mb = os.path.getsize(dest) / (1024 * 1024)
 
-    cloud_built = False
-    try:
-        _write_threshold_cloud_cache(dest, 99.96)
-        cloud_built = True
-    except Exception:
-        current_app.logger.exception("threshold cloud cache build failed after upload")
+    _warm_cloud_cache_async(dest, 99.96)
 
     return jsonify(
         {
             "success": True,
             "filename": name,
             "size_mb": round(size_mb, 1),
-            "cloud_cache": cloud_built,
+            "cloud_warming": True,
         }
     )
 
@@ -426,6 +422,55 @@ def _write_threshold_cloud_cache(filepath: str, threshold_pct: float) -> dict:
     with open(cache_path, "w", encoding="utf-8") as f:
         json.dump(payload, f)
     return payload
+
+
+def _warm_cloud_cache_async(filepath: str, threshold_pct: float = 99.96) -> None:
+    """Build cloud cache in a background thread (upload must return before this finishes)."""
+    cache_path = _cloud_cache_path(filepath, threshold_pct)
+    if os.path.isfile(cache_path):
+        return
+
+    app = current_app._get_current_object()
+
+    def _run():
+        try:
+            with app.app_context():
+                if os.path.isfile(cache_path):
+                    return
+                _write_threshold_cloud_cache(filepath, threshold_pct)
+        except Exception:
+            app.logger.exception("background cloud cache build failed")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+@scans_bp.route("/<filename>/warm_cloud", methods=["POST"])
+def warm_cloud(filename):
+    data_dir = current_app.config["DATA_DIR"]
+    filepath = os.path.join(data_dir, filename)
+    if not os.path.isfile(filepath):
+        return jsonify({"error": f"Scan '{filename}' not found"}), 404
+
+    body = request.get_json(silent=True) or {}
+    threshold_pct = float(body.get("threshold_pct", 99.96))
+    cache_path = _cloud_cache_path(filepath, threshold_pct)
+    if os.path.isfile(cache_path):
+        return jsonify({"warming": False, "ready": True, "threshold_pct": threshold_pct})
+
+    _warm_cloud_cache_async(filepath, threshold_pct)
+    return jsonify({"warming": True, "ready": False, "threshold_pct": threshold_pct})
+
+
+@scans_bp.route("/<filename>/cloud_ready", methods=["GET"])
+def cloud_ready(filename):
+    data_dir = current_app.config["DATA_DIR"]
+    filepath = os.path.join(data_dir, filename)
+    if not os.path.isfile(filepath):
+        return jsonify({"ready": False, "error": f"Scan '{filename}' not found"}), 404
+
+    threshold_pct = float(request.args.get("threshold_pct", 99.96))
+    ready = os.path.isfile(_cloud_cache_path(filepath, threshold_pct))
+    return jsonify({"ready": ready, "threshold_pct": threshold_pct})
 
 
 @scans_bp.route("/<filename>/threshold_cloud", methods=["POST"])
