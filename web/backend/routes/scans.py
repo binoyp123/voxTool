@@ -1,4 +1,5 @@
 import heapq
+import json
 import os
 
 import numpy as np
@@ -207,11 +208,20 @@ def upload_scan():
     dest = os.path.join(data_dir, name)
     upload.save(dest)
     size_mb = os.path.getsize(dest) / (1024 * 1024)
+
+    cloud_built = False
+    try:
+        _write_threshold_cloud_cache(dest, 99.96)
+        cloud_built = True
+    except Exception:
+        current_app.logger.exception("threshold cloud cache build failed after upload")
+
     return jsonify(
         {
             "success": True,
             "filename": name,
             "size_mb": round(size_mb, 1),
+            "cloud_cache": cloud_built,
         }
     )
 
@@ -347,6 +357,77 @@ def _indices_above_thr_from_dataobj(
     return np.vstack(chunks), total
 
 
+def _excluded_set(excluded):
+    ex = set()
+    for triplet in excluded or []:
+        if isinstance(triplet, (list, tuple)) and len(triplet) == 3:
+            ex.add((int(triplet[0]), int(triplet[1]), int(triplet[2])))
+    return ex
+
+
+def _cloud_cache_path(filepath: str, threshold_pct: float) -> str:
+    return f"{filepath}.cloud_{threshold_pct:.4f}.json"
+
+
+def _build_threshold_cloud_payload(
+    filepath: str,
+    threshold_pct: float,
+    max_points: int = 400_000,
+    seed: int = 0,
+    excluded: list | None = None,
+) -> dict:
+    import nibabel as nib
+
+    img = nib.load(filepath)
+    dataobj = img.dataobj
+    if dataobj.ndim == 4 and dataobj.shape[3] == 1:
+        dataobj = dataobj[:, :, :, 0]
+    affine = img.affine.astype(np.float64)
+    shape = [int(x) for x in dataobj.shape[:3]]
+    nz = shape[2]
+
+    thr = _percentile_thr_from_dataobj(dataobj, nz, threshold_pct, seed=seed)
+    ex = _excluded_set(excluded)
+    idx, total = _indices_above_thr_from_dataobj(dataobj, nz, thr, ex if ex else None)
+
+    if total == 0:
+        return {
+            "success": True,
+            "points": [],
+            "intensity_threshold": thr,
+            "threshold_pct": threshold_pct,
+            "total_voxels": 0,
+            "returned": 0,
+            "shape": shape,
+            "voxel_spacing_mm": _voxel_spacing_mm(affine),
+        }
+
+    if total > max_points:
+        rng = np.random.default_rng(seed)
+        pick = rng.choice(total, size=max_points, replace=False)
+        idx = idx[pick]
+
+    points = idx.astype(np.int32).tolist()
+    return {
+        "success": True,
+        "points": points,
+        "intensity_threshold": thr,
+        "threshold_pct": threshold_pct,
+        "total_voxels": total,
+        "returned": len(points),
+        "shape": shape,
+        "voxel_spacing_mm": _voxel_spacing_mm(affine),
+    }
+
+
+def _write_threshold_cloud_cache(filepath: str, threshold_pct: float) -> dict:
+    payload = _build_threshold_cloud_payload(filepath, threshold_pct)
+    cache_path = _cloud_cache_path(filepath, threshold_pct)
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+    return payload
+
+
 @scans_bp.route("/<filename>/threshold_cloud", methods=["POST"])
 def threshold_cloud(filename):
     """Sparse super-threshold voxels as integer [i,j,k] indices (numpy / nibabel order).
@@ -358,8 +439,6 @@ def threshold_cloud(filename):
       excluded_voxels?: [[i,j,k], ...]
     }
     """
-    import nibabel as nib
-
     data_dir = current_app.config["DATA_DIR"]
     filepath = os.path.join(data_dir, filename)
     if not os.path.isfile(filepath):
@@ -374,59 +453,30 @@ def threshold_cloud(filename):
     if not (0 < threshold_pct <= 100):
         return jsonify({"error": "threshold_pct must be in (0, 100]"}), 400
 
-    # Read slices via dataobj — never materialize the full volume (Render free tier ~512MB).
-    img = nib.load(filepath)
-    dataobj = img.dataobj
-    if dataobj.ndim == 4 and dataobj.shape[3] == 1:
-        dataobj = dataobj[:, :, :, 0]
-    affine = img.affine.astype(np.float64)
-    shape = [int(x) for x in dataobj.shape[:3]]
-    nz = shape[2]
+    cache_path = _cloud_cache_path(filepath, threshold_pct)
+    if not excluded and os.path.isfile(cache_path):
+        with open(cache_path, encoding="utf-8") as f:
+            payload = json.load(f)
+        points = payload.get("points") or []
+        total = int(payload.get("total_voxels") or len(points))
+        if total > max_points and len(points) > max_points:
+            rng = np.random.default_rng(seed)
+            pick = rng.choice(len(points), size=max_points, replace=False)
+            points = [points[i] for i in pick]
+        payload["points"] = points
+        payload["returned"] = len(points)
+        return jsonify(payload)
 
-    thr = _percentile_thr_from_dataobj(dataobj, nz, threshold_pct, seed=seed)
-    ex = _excluded_set(excluded)
-    idx, total = _indices_above_thr_from_dataobj(dataobj, nz, thr, ex if ex else None)
-
-    if total == 0:
-        return jsonify(
-            {
-                "success": True,
-                "points": [],
-                "intensity_threshold": thr,
-                "threshold_pct": threshold_pct,
-                "total_voxels": 0,
-                "returned": 0,
-                "shape": shape,
-                "voxel_spacing_mm": _voxel_spacing_mm(affine),
-            }
-        )
-
-    if total > max_points:
-        rng = np.random.default_rng(seed)
-        pick = rng.choice(total, size=max_points, replace=False)
-        idx = idx[pick]
-
-    points = idx.astype(np.int32).tolist()
-    return jsonify(
-        {
-            "success": True,
-            "points": points,
-            "intensity_threshold": thr,
-            "threshold_pct": threshold_pct,
-            "total_voxels": total,
-            "returned": len(points),
-            "shape": shape,
-            "voxel_spacing_mm": _voxel_spacing_mm(affine),
-        }
+    payload = _build_threshold_cloud_payload(
+        filepath, threshold_pct, max_points=max_points, seed=seed, excluded=excluded
     )
-
-
-def _excluded_set(excluded):
-    ex = set()
-    for triplet in excluded or []:
-        if isinstance(triplet, (list, tuple)) and len(triplet) == 3:
-            ex.add((int(triplet[0]), int(triplet[1]), int(triplet[2])))
-    return ex
+    if not excluded:
+        try:
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+        except OSError:
+            current_app.logger.exception("failed to write threshold cloud cache")
+    return jsonify(payload)
 
 
 @scans_bp.route("/<filename>/bright_component", methods=["POST"])
