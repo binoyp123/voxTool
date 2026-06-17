@@ -1,6 +1,7 @@
 import heapq
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -212,14 +213,17 @@ def upload_scan():
     upload.save(dest)
     size_mb = os.path.getsize(dest) / (1024 * 1024)
 
-    _warm_cloud_cache_async(dest, 99.96)
+    cloud_ready = _install_bundled_cloud_cache(dest, 99.96)
+    if not cloud_ready:
+        _warm_cloud_cache_async(dest, 99.96)
 
     return jsonify(
         {
             "success": True,
             "filename": name,
             "size_mb": round(size_mb, 1),
-            "cloud_warming": True,
+            "cloud_ready": cloud_ready,
+            "cloud_warming": not cloud_ready,
         }
     )
 
@@ -367,6 +371,32 @@ def _cloud_cache_path(filepath: str, threshold_pct: float) -> str:
     return f"{filepath}.cloud_{threshold_pct:.4f}.json"
 
 
+def _bundled_cloud_cache_path(filename: str, threshold_pct: float) -> str:
+    bundled_dir = current_app.config.get("BUNDLED_CLOUD_DIR")
+    if not bundled_dir:
+        return ""
+    return os.path.join(bundled_dir, f"{filename}.cloud_{threshold_pct:.4f}.json")
+
+
+def _install_bundled_cloud_cache(filepath: str, threshold_pct: float = 99.96) -> bool:
+    """Copy a pre-built cloud JSON shipped with the repo (instant on Render)."""
+    cache_path = _cloud_cache_path(filepath, threshold_pct)
+    if os.path.isfile(cache_path):
+        return True
+
+    bundled = _bundled_cloud_cache_path(os.path.basename(filepath), threshold_pct)
+    if not bundled or not os.path.isfile(bundled):
+        return False
+
+    shutil.copy2(bundled, cache_path)
+    lock_path = cache_path + ".building"
+    try:
+        os.remove(lock_path)
+    except OSError:
+        pass
+    return True
+
+
 def _build_threshold_cloud_payload(
     filepath: str,
     threshold_pct: float,
@@ -456,6 +486,9 @@ def warm_cloud(filename):
 
     body = request.get_json(silent=True) or {}
     threshold_pct = float(body.get("threshold_pct", 99.96))
+    if _install_bundled_cloud_cache(filepath, threshold_pct):
+        return jsonify({"warming": False, "ready": True, "threshold_pct": threshold_pct})
+
     cache_path = _cloud_cache_path(filepath, threshold_pct)
     if os.path.isfile(cache_path):
         return jsonify({"warming": False, "ready": True, "threshold_pct": threshold_pct})
@@ -472,6 +505,7 @@ def cloud_ready(filename):
         return jsonify({"ready": False, "error": f"Scan '{filename}' not found"}), 404
 
     threshold_pct = float(request.args.get("threshold_pct", 99.96))
+    _install_bundled_cloud_cache(filepath, threshold_pct)
     cache_path = _cloud_cache_path(filepath, threshold_pct)
     lock_path = cache_path + ".building"
     ready = os.path.isfile(cache_path)
@@ -511,6 +545,8 @@ def threshold_cloud(filename):
 
     if not (0 < threshold_pct <= 100):
         return jsonify({"error": "threshold_pct must be in (0, 100]"}), 400
+
+    _install_bundled_cloud_cache(filepath, threshold_pct)
 
     cache_path = _cloud_cache_path(filepath, threshold_pct)
     if not excluded and os.path.isfile(cache_path):

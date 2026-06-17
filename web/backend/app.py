@@ -13,6 +13,7 @@ def create_app():
 
     app.config["DATA_DIR"] = os.path.join(BASE_DIR, "data")
     app.config["ANNOTATIONS_DIR"] = os.path.join(BASE_DIR, "annotations")
+    app.config["BUNDLED_CLOUD_DIR"] = os.path.join(BASE_DIR, "cloud_caches")
     app.config["MAX_CONTENT_LENGTH"] = 150 * 1024 * 1024  # 150 MB NIfTI uploads
 
     os.makedirs(app.config["DATA_DIR"], exist_ok=True)
