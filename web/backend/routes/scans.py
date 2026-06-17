@@ -299,6 +299,40 @@ def _voxel_spacing_mm(affine: np.ndarray) -> list:
     ]
 
 
+def _percentile_thr_sampled(data: np.ndarray, pct: float) -> float:
+    """Percentile on a strided sample — avoids sorting the full volume."""
+    flat = data.ravel()
+    step = max(1, flat.size // 2_000_000)
+    return float(np.percentile(flat[::step], pct))
+
+
+def _indices_above_thr_slicewise(
+    data: np.ndarray, thr: float, excluded: set | None
+) -> tuple[np.ndarray, int]:
+    """Collect super-threshold voxel indices one z-slab at a time (low peak RAM)."""
+    chunks: list[np.ndarray] = []
+    total = 0
+    for k in range(int(data.shape[2])):
+        ij = np.argwhere(data[:, :, k] >= thr)
+        if ij.size == 0:
+            continue
+        pts = np.empty((len(ij), 3), dtype=np.int32)
+        pts[:, 0] = ij[:, 0]
+        pts[:, 1] = ij[:, 1]
+        pts[:, 2] = k
+        if excluded:
+            mask = [
+                (int(p[0]), int(p[1]), int(p[2])) not in excluded for p in pts
+            ]
+            pts = pts[np.asarray(mask, dtype=bool)]
+        if len(pts):
+            chunks.append(pts)
+            total += len(pts)
+    if not chunks:
+        return np.empty((0, 3), dtype=np.int32), 0
+    return np.vstack(chunks), total
+
+
 @scans_bp.route("/<filename>/threshold_cloud", methods=["POST"])
 def threshold_cloud(filename):
     """Sparse super-threshold voxels as integer [i,j,k] indices (numpy / nibabel order).
@@ -310,6 +344,8 @@ def threshold_cloud(filename):
       excluded_voxels?: [[i,j,k], ...]
     }
     """
+    import nibabel as nib
+
     data_dir = current_app.config["DATA_DIR"]
     filepath = os.path.join(data_dir, filename)
     if not os.path.isfile(filepath):
@@ -324,17 +360,17 @@ def threshold_cloud(filename):
     if not (0 < threshold_pct <= 100):
         return jsonify({"error": "threshold_pct must be in (0, 100]"}), 400
 
-    vol = get_volume(filepath)
-    thr = float(np.percentile(vol.data, threshold_pct))
-    # argwhere allocates a brief boolean mask; float32 volume keeps this under
-    # Render free-tier RAM (~512MB).
-    idx = np.argwhere(vol.data >= thr)
-    if excluded:
-        ex = _excluded_set(excluded)
-        if ex:
-            keep = [row for row in idx if (int(row[0]), int(row[1]), int(row[2])) not in ex]
-            idx = np.asarray(keep, dtype=np.int32) if keep else np.empty((0, 3), dtype=np.int32)
-    total = int(idx.shape[0])
+    # Load without the global volume cache — keeps peak RAM low on Render free tier.
+    img = nib.load(filepath)
+    data = np.asarray(img.get_fdata(), dtype=np.float32).squeeze()
+    affine = img.affine.astype(np.float64)
+    shape = [int(x) for x in data.shape]
+
+    thr = _percentile_thr_sampled(data, threshold_pct)
+    ex = _excluded_set(excluded)
+    idx, total = _indices_above_thr_slicewise(data, thr, ex if ex else None)
+    del data
+
     if total == 0:
         return jsonify(
             {
@@ -344,8 +380,8 @@ def threshold_cloud(filename):
                 "threshold_pct": threshold_pct,
                 "total_voxels": 0,
                 "returned": 0,
-                "shape": [int(x) for x in vol.data.shape],
-                "voxel_spacing_mm": _voxel_spacing_mm(vol.affine),
+                "shape": shape,
+                "voxel_spacing_mm": _voxel_spacing_mm(affine),
             }
         )
 
@@ -363,8 +399,8 @@ def threshold_cloud(filename):
             "threshold_pct": threshold_pct,
             "total_voxels": total,
             "returned": len(points),
-            "shape": [int(x) for x in vol.data.shape],
-            "voxel_spacing_mm": _voxel_spacing_mm(vol.affine),
+            "shape": shape,
+            "voxel_spacing_mm": _voxel_spacing_mm(affine),
         }
     )
 
