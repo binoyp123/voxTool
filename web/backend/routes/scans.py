@@ -189,6 +189,33 @@ def list_scans():
     return jsonify(files)
 
 
+@scans_bp.route("/upload", methods=["POST"])
+def upload_scan():
+    """Upload a NIfTI volume into the server data directory (for cloud deploys)."""
+    data_dir = current_app.config["DATA_DIR"]
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        return jsonify({"success": False, "error": "file is required"}), 400
+
+    name = os.path.basename(upload.filename)
+    lower = name.lower()
+    if not (lower.endswith(".nii") or lower.endswith(".nii.gz")):
+        return jsonify(
+            {"success": False, "error": "filename must end with .nii or .nii.gz"}
+        ), 400
+
+    dest = os.path.join(data_dir, name)
+    upload.save(dest)
+    size_mb = os.path.getsize(dest) / (1024 * 1024)
+    return jsonify(
+        {
+            "success": True,
+            "filename": name,
+            "size_mb": round(size_mb, 1),
+        }
+    )
+
+
 @scans_bp.route("/<filename>/range", methods=["GET"])
 def intensity_range(filename):
     """Return p1/p99 percentile intensity range for the Auto windowing preset."""

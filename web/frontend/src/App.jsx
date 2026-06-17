@@ -69,6 +69,7 @@ export default function App() {
   const [showPicker, setShowPicker] = useState(false);
   const [scanList, setScanList] = useState([]);
   const [pickerSelected, setPickerSelected] = useState("");
+  const [uploadingScan, setUploadingScan] = useState(false);
   const [saving, setSaving] = useState(false);
   // {tone: 'ok'|'warn'|'err', text: string} — shows under the Interpolate button.
   const [interpStatus, setInterpStatus] = useState(null);
@@ -103,6 +104,46 @@ export default function App() {
     }
     setShowPicker(false);
   }, [pickerSelected]);
+
+  const handleScanUpload = useCallback(
+    async (file) => {
+      if (!file) return;
+      const lower = file.name.toLowerCase();
+      if (!lower.endsWith(".nii") && !lower.endsWith(".nii.gz")) {
+        alert("Please choose a .nii or .nii.gz file.");
+        return;
+      }
+      setUploadingScan(true);
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const res = await fetch(`${API}/api/scans/upload`, {
+          method: "POST",
+          body: form,
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || `Upload failed (${res.status})`);
+        }
+        const listRes = await fetch(`${API}/api/scans/`);
+        const list = await listRes.json();
+        setScanList(list);
+        setPickerSelected(data.filename);
+        setScanFilename(data.filename);
+        setShowPicker(false);
+        alert(`Uploaded ${data.filename} (${data.size_mb} MB).`);
+      } catch (err) {
+        console.error("handleScanUpload:", err);
+        alert(
+          `Upload failed: ${err.message || err}. ` +
+            `Large files (~80 MB) can take a few minutes on Render free tier.`
+        );
+      } finally {
+        setUploadingScan(false);
+      }
+    },
+    []
+  );
 
   const applyThreshold = useCallback(() => {
     const v = parseFloat(String(thresholdInput).replace(",", "."));
@@ -866,8 +907,9 @@ export default function App() {
             <h2>Select a Scan</h2>
             {scanList.length === 0 ? (
               <p style={{ color: "var(--text-secondary)" }}>
-                No scans found. Place <code>.nii</code> or{" "}
-                <code>.nii.gz</code> files in <code>web/backend/data/</code>.
+                No scans on the server yet. Upload a CT below, or place{" "}
+                <code>.nii</code> / <code>.nii.gz</code> in{" "}
+                <code>web/backend/data/</code> when running locally.
               </p>
             ) : (
               <ul className="scan-list">
@@ -887,14 +929,28 @@ export default function App() {
                 ))}
               </ul>
             )}
-            <div className="modal-actions">
+            <div className="modal-actions modal-actions-scan">
+              <label className="btn btn-primary" style={{ cursor: uploadingScan ? "wait" : "pointer" }}>
+                {uploadingScan ? "Uploading…" : "Upload .nii / .nii.gz"}
+                <input
+                  type="file"
+                  accept=".nii,.gz,application/gzip"
+                  style={{ display: "none" }}
+                  disabled={uploadingScan}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) handleScanUpload(f);
+                    e.target.value = "";
+                  }}
+                />
+              </label>
               <button className="btn" onClick={() => setShowPicker(false)}>
                 Cancel
               </button>
               <button
                 className="btn btn-primary"
                 onClick={confirmScanPick}
-                disabled={!pickerSelected}
+                disabled={!pickerSelected || uploadingScan}
               >
                 Load
               </button>
