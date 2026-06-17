@@ -89,10 +89,21 @@ export default function ThresholdCloudViewer({
 
   const fetchCloud = useCallback(async () => {
     if (!scanFilename) return;
+    if (!API) {
+      setError(
+        "API URL not configured. Set REACT_APP_API_URL on Vercel to your Render URL and redeploy."
+      );
+      return;
+    }
     setComponentVoxels(null);
     setLoading(true);
     setError(null);
     try {
+      // Wake Render free tier (cold start can take 30–60s).
+      await fetch(`${API}/api/health`, { signal: AbortSignal.timeout(90_000) }).catch(
+        () => {}
+      );
+
       const res = await fetch(`${API}/api/scans/${scanFilename}/threshold_cloud`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -101,9 +112,18 @@ export default function ThresholdCloudViewer({
           max_points: 400000,
           seed: 0,
         }),
+        signal: AbortSignal.timeout(180_000),
       });
       if (!res.ok) {
-        throw new Error(`threshold_cloud HTTP ${res.status}`);
+        const errBody = await res.json().catch(() => ({}));
+        const msg = errBody.error || errBody.message;
+        if (res.status === 404) {
+          throw new Error(
+            msg ||
+              `Scan not on server — re-upload ${scanFilename} via Load Scan (Render does not keep files across redeploys).`
+          );
+        }
+        throw new Error(msg || `threshold_cloud HTTP ${res.status}`);
       }
       const data = await res.json();
       if (!data.success && data.error) {
@@ -121,7 +141,16 @@ export default function ThresholdCloudViewer({
       rebuildPoints(data.points || [], sp);
     } catch (e) {
       console.error("threshold_cloud:", e);
-      setError(e.message || String(e));
+      const msg = e?.message || String(e);
+      if (msg === "Failed to fetch" || e?.name === "TimeoutError") {
+        setError(
+          "Cloud request timed out or could not reach the API. " +
+            "Open https://voxtool-api.onrender.com/api/health in a tab, wait until it responds, " +
+            "then click Refresh cloud. Also re-upload the scan if you redeployed Render."
+        );
+      } else {
+        setError(msg);
+      }
       rebuildPoints([], spacingRef.current || [1, 1, 1]);
     } finally {
       setLoading(false);
