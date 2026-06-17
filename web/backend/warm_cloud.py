@@ -1,6 +1,7 @@
 """Build threshold-cloud JSON cache (run as a detached subprocess on Render)."""
 import os
 import sys
+import time
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
@@ -24,6 +25,12 @@ def main() -> int:
     lock_path = cache_path + ".building"
     if os.path.isfile(cache_path):
         return 0
+
+    if os.path.isfile(lock_path):
+        age = time.time() - os.path.getmtime(lock_path)
+        if age < 900:
+            return 0
+        os.remove(lock_path)
 
     try:
         with open(lock_path, "x", encoding="utf-8"):

@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 import numpy as np
 from flask import Blueprint, send_from_directory, jsonify, current_app, request
@@ -432,24 +433,18 @@ def _warm_cloud_cache_async(filepath: str, threshold_pct: float = 99.96) -> None
     if os.path.isfile(cache_path) or os.path.isfile(lock_path):
         return
 
-    try:
-        with open(lock_path, "x", encoding="utf-8"):
-            pass
-    except FileExistsError:
-        return
-
     script = os.path.join(os.path.dirname(os.path.dirname(__file__)), "warm_cloud.py")
-    if not os.path.isfile(script):
-        script = os.path.join(os.path.dirname(__file__), "..", "warm_cloud.py")
     script = os.path.abspath(script)
 
-    subprocess.Popen(
-        [sys.executable, script, filepath, str(threshold_pct)],
-        cwd=os.path.dirname(script),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    log_path = cache_path + ".log"
+    with open(log_path, "ab") as log:
+        subprocess.Popen(
+            [sys.executable, script, filepath, str(threshold_pct)],
+            cwd=os.path.dirname(script),
+            stdout=log,
+            stderr=log,
+            start_new_session=True,
+        )
 
 
 @scans_bp.route("/<filename>/warm_cloud", methods=["POST"])
@@ -478,8 +473,17 @@ def cloud_ready(filename):
 
     threshold_pct = float(request.args.get("threshold_pct", 99.96))
     cache_path = _cloud_cache_path(filepath, threshold_pct)
+    lock_path = cache_path + ".building"
     ready = os.path.isfile(cache_path)
-    building = os.path.isfile(cache_path + ".building")
+    building = os.path.isfile(lock_path)
+    if building and not ready:
+        age = time.time() - os.path.getmtime(lock_path)
+        if age > 900:
+            try:
+                os.remove(lock_path)
+            except OSError:
+                pass
+            building = False
     return jsonify({"ready": ready, "building": building, "threshold_pct": threshold_pct})
 
 
