@@ -1,7 +1,8 @@
 import heapq
 import json
 import os
-import threading
+import subprocess
+import sys
 
 import numpy as np
 from flask import Blueprint, send_from_directory, jsonify, current_app, request
@@ -425,23 +426,30 @@ def _write_threshold_cloud_cache(filepath: str, threshold_pct: float) -> dict:
 
 
 def _warm_cloud_cache_async(filepath: str, threshold_pct: float = 99.96) -> None:
-    """Build cloud cache in a background thread (upload must return before this finishes)."""
+    """Spawn a detached subprocess to build the cloud cache (threads die on gunicorn)."""
     cache_path = _cloud_cache_path(filepath, threshold_pct)
-    if os.path.isfile(cache_path):
+    lock_path = cache_path + ".building"
+    if os.path.isfile(cache_path) or os.path.isfile(lock_path):
         return
 
-    app = current_app._get_current_object()
+    try:
+        with open(lock_path, "x", encoding="utf-8"):
+            pass
+    except FileExistsError:
+        return
 
-    def _run():
-        try:
-            with app.app_context():
-                if os.path.isfile(cache_path):
-                    return
-                _write_threshold_cloud_cache(filepath, threshold_pct)
-        except Exception:
-            app.logger.exception("background cloud cache build failed")
+    script = os.path.join(os.path.dirname(os.path.dirname(__file__)), "warm_cloud.py")
+    if not os.path.isfile(script):
+        script = os.path.join(os.path.dirname(__file__), "..", "warm_cloud.py")
+    script = os.path.abspath(script)
 
-    threading.Thread(target=_run, daemon=True).start()
+    subprocess.Popen(
+        [sys.executable, script, filepath, str(threshold_pct)],
+        cwd=os.path.dirname(script),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
 
 
 @scans_bp.route("/<filename>/warm_cloud", methods=["POST"])
@@ -469,8 +477,10 @@ def cloud_ready(filename):
         return jsonify({"ready": False, "error": f"Scan '{filename}' not found"}), 404
 
     threshold_pct = float(request.args.get("threshold_pct", 99.96))
-    ready = os.path.isfile(_cloud_cache_path(filepath, threshold_pct))
-    return jsonify({"ready": ready, "threshold_pct": threshold_pct})
+    cache_path = _cloud_cache_path(filepath, threshold_pct)
+    ready = os.path.isfile(cache_path)
+    building = os.path.isfile(cache_path + ".building")
+    return jsonify({"ready": ready, "building": building, "threshold_pct": threshold_pct})
 
 
 @scans_bp.route("/<filename>/threshold_cloud", methods=["POST"])
