@@ -112,7 +112,7 @@ export default function ThresholdCloudViewer({
           max_points: 400000,
           seed: 0,
         }),
-        signal: AbortSignal.timeout(180_000),
+        signal: AbortSignal.timeout(300_000),
       });
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
@@ -121,6 +121,12 @@ export default function ThresholdCloudViewer({
           throw new Error(
             msg ||
               `Scan not on server — re-upload ${scanFilename} via Load Scan (Render does not keep files across redeploys).`
+          );
+        }
+        if (res.status === 502 || res.status === 503) {
+          throw new Error(
+            "API overloaded or still deploying — wait 1–2 minutes, open /api/health, then Refresh cloud. " +
+              "First cloud load can take 2–3 minutes on the free tier."
           );
         }
         throw new Error(msg || `threshold_cloud HTTP ${res.status}`);

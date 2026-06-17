@@ -23,7 +23,10 @@ def create_app():
 
     @app.route("/api/health")
     def health():
-        return {"status": "ok"}
+        return {
+            "status": "ok",
+            "build": os.environ.get("RENDER_GIT_COMMIT", "local")[:8],
+        }
 
     return app
 
