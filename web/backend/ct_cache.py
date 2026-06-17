@@ -19,7 +19,9 @@ class CTVolume:
     def __init__(self, filepath):
         self.filepath = filepath
         img = nib.load(filepath)
-        self.data = np.asarray(img.get_fdata()).squeeze()
+        # float32 halves RAM (~500MB→~250MB for typical head CTs); required on
+        # Render free tier (512MB).
+        self.data = np.asarray(img.get_fdata(), dtype=np.float32).squeeze()
         self.affine = img.affine.astype(np.float64)
         self.inv_affine = np.linalg.inv(self.affine)
         # Threshold cache: maps threshold_pct -> Nx3 array of voxel indices

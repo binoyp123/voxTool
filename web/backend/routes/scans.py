@@ -326,17 +326,14 @@ def threshold_cloud(filename):
 
     vol = get_volume(filepath)
     thr = float(np.percentile(vol.data, threshold_pct))
-    mask = vol.data >= thr
-
-    for triplet in excluded:
-        if not (isinstance(triplet, (list, tuple)) and len(triplet) == 3):
-            continue
-        i, j, k = int(triplet[0]), int(triplet[1]), int(triplet[2])
-        sh = vol.data.shape
-        if 0 <= i < sh[0] and 0 <= j < sh[1] and 0 <= k < sh[2]:
-            mask[i, j, k] = False
-
-    idx = np.argwhere(mask)
+    # argwhere allocates a brief boolean mask; float32 volume keeps this under
+    # Render free-tier RAM (~512MB).
+    idx = np.argwhere(vol.data >= thr)
+    if excluded:
+        ex = _excluded_set(excluded)
+        if ex:
+            keep = [row for row in idx if (int(row[0]), int(row[1]), int(row[2])) not in ex]
+            idx = np.asarray(keep, dtype=np.int32) if keep else np.empty((0, 3), dtype=np.int32)
     total = int(idx.shape[0])
     if total == 0:
         return jsonify(
