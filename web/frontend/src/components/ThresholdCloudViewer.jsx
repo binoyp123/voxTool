@@ -116,7 +116,19 @@ export default function ThresholdCloudViewer({
         () => {}
       );
 
-      // After upload, the API builds the cloud cache in the background (~2 min).
+      const listRes = await fetch(`${API}/api/scans/`, {
+        signal: AbortSignal.timeout(30_000),
+      }).catch(() => null);
+      const serverScans = listRes?.ok ? await listRes.json().catch(() => []) : [];
+      if (!Array.isArray(serverScans) || !serverScans.includes(scanFilename)) {
+        throw new Error(
+          `${scanFilename} is not on the Render server. ` +
+            "Open Load Scan → Upload again (wait 1–2 min). " +
+            "Render wipes files after each redeploy."
+        );
+      }
+
+      // Install bundled cloud cache if available (instant on Render).
       await fetch(`${API}/api/scans/${scanFilename}/warm_cloud`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -125,26 +137,29 @@ export default function ThresholdCloudViewer({
       }).catch(() => {});
 
       let cacheReady = false;
-      for (let attempt = 0; attempt < 40; attempt++) {
+      for (let attempt = 0; attempt < 12; attempt++) {
         const readyRes = await fetch(
           `${API}/api/scans/${scanFilename}/cloud_ready?threshold_pct=${cloudThresholdPct}`,
           { signal: AbortSignal.timeout(30_000) }
         ).catch(() => null);
         if (readyRes?.ok) {
           const readyData = await readyRes.json().catch(() => ({}));
+          if (readyData.error && readyData.error.includes("not found")) {
+            throw new Error(
+              `${scanFilename} is not on the Render server — re-upload via Load Scan.`
+            );
+          }
           if (readyData.ready) {
             cacheReady = true;
             break;
           }
         }
         if (attempt === 0) {
-          setError("Building cloud preview (first time may take 2–3 minutes)…");
+          setError("Preparing cloud preview…");
         }
-        await new Promise((r) => setTimeout(r, 5000));
+        await new Promise((r) => setTimeout(r, 2000));
       }
-      if (!cacheReady) {
-        setError(null);
-      }
+      setError(null);
 
       const res = await fetch(`${API}/api/scans/${scanFilename}/threshold_cloud`, {
         method: "POST",
