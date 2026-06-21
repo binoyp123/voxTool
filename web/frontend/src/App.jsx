@@ -115,6 +115,10 @@ export default function App() {
       }
       setUploadingScan(true);
       try {
+        await fetch(`${API}/api/health`, { signal: AbortSignal.timeout(90_000) }).catch(
+          () => {}
+        );
+
         const form = new FormData();
         form.append("file", file);
         const res = await fetch(`${API}/api/scans/upload`, {
@@ -122,17 +126,33 @@ export default function App() {
           body: form,
           signal: AbortSignal.timeout(300_000),
         });
-        const data = await res.json();
+        let data = {};
+        try {
+          data = await res.json();
+        } catch {
+          throw new Error(`Upload failed (HTTP ${res.status}). Connection may have dropped — try again.`);
+        }
         if (!res.ok || !data.success) {
           throw new Error(data.error || `Upload failed (${res.status})`);
         }
-        const listRes = await fetch(`${API}/api/scans/`);
+
+        const listRes = await fetch(`${API}/api/scans/`, {
+          signal: AbortSignal.timeout(30_000),
+        });
         const list = await listRes.json();
+        if (!Array.isArray(list) || !list.includes(data.filename)) {
+          throw new Error(
+            `${data.filename} did not appear on the server after upload. Wait 30s and try again.`
+          );
+        }
         setScanList(list);
         setPickerSelected(data.filename);
         setScanFilename(data.filename);
         setShowPicker(false);
-        alert(`Uploaded ${data.filename} (${data.size_mb} MB).`);
+        alert(
+          `Uploaded ${data.filename} (${data.size_mb} MB).\n\n` +
+            "You can open Threshold cloud now."
+        );
       } catch (err) {
         console.error("handleScanUpload:", err);
         alert(
