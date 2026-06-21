@@ -397,6 +397,51 @@ def _install_bundled_cloud_cache(filepath: str, threshold_pct: float = 99.96) ->
     return True
 
 
+def _open_scan_dataobj(filepath: str):
+    import nibabel as nib
+
+    img = nib.load(filepath)
+    dataobj = img.dataobj
+    if dataobj.ndim == 4 and dataobj.shape[3] == 1:
+        dataobj = dataobj[:, :, :, 0]
+    affine = img.affine.astype(np.float64)
+    shape = tuple(int(x) for x in dataobj.shape[:3])
+    return dataobj, affine, shape
+
+
+class _SlabCache:
+    """Load each z-slab once during BFS (fast on gzip without full-volume RAM)."""
+
+    def __init__(self, dataobj):
+        self.dataobj = dataobj
+        self._slabs: dict[int, np.ndarray] = {}
+
+    def value(self, i: int, j: int, k: int) -> float:
+        slab = self._slabs.get(k)
+        if slab is None:
+            slab = np.asarray(self.dataobj[:, :, k], dtype=np.float32)
+            self._slabs[k] = slab
+        return float(slab[i, j])
+
+
+def _cached_cloud_threshold(filepath: str, threshold_pct: float) -> float | None:
+    _install_bundled_cloud_cache(filepath, threshold_pct)
+    cache_path = _cloud_cache_path(filepath, threshold_pct)
+    if not os.path.isfile(cache_path):
+        return None
+    with open(cache_path, encoding="utf-8") as f:
+        thr = json.load(f).get("intensity_threshold")
+    return float(thr) if thr is not None else None
+
+
+def _threshold_for_pick(filepath: str, threshold_pct: float) -> float:
+    thr = _cached_cloud_threshold(filepath, threshold_pct)
+    if thr is not None:
+        return thr
+    dataobj, _, shape = _open_scan_dataobj(filepath)
+    return _percentile_thr_from_dataobj(dataobj, shape[2], threshold_pct)
+
+
 def _build_threshold_cloud_payload(
     filepath: str,
     threshold_pct: float,
@@ -607,14 +652,14 @@ def bright_component(filename):
     if not (0 < threshold_pct <= 100):
         return jsonify({"success": False, "error": "threshold_pct must be in (0, 100]"}), 400
 
-    vol = get_volume(filepath)
-    shape = vol.data.shape
+    dataobj, affine, shape = _open_scan_dataobj(filepath)
     si, sj, sk = int(seed[0]), int(seed[1]), int(seed[2])
     if not (0 <= si < shape[0] and 0 <= sj < shape[1] and 0 <= sk < shape[2]):
         return jsonify({"success": False, "error": "seed_voxel out of bounds"}), 400
 
-    thr = float(np.percentile(vol.data, threshold_pct))
-    if float(vol.data[si, sj, sk]) < thr:
+    thr = _threshold_for_pick(filepath, threshold_pct)
+    slab = _SlabCache(dataobj)
+    if slab.value(si, sj, sk) < thr:
         return jsonify(
             {
                 "success": False,
@@ -626,7 +671,7 @@ def bright_component(filename):
     ex_set = _excluded_set(excluded)
 
     # ||affine @ (voxel - seed)|| mm — translation cancels; cheap per-offset check.
-    M = vol.affine[:3, :3].astype(np.float64)
+    M = affine[:3, :3]
 
     def offset_sq_mm(di: int, dj: int, dk: int) -> float:
         v = M @ np.array([di, dj, dk], dtype=np.float64)
@@ -652,7 +697,7 @@ def bright_component(filename):
             continue
         if not within_ball(i, j, k):
             continue
-        if float(vol.data[i, j, k]) < thr:
+        if slab.value(i, j, k) < thr:
             continue
         visited.add((i, j, k))
         component.append([int(i), int(j), int(k)])
@@ -672,7 +717,7 @@ def bright_component(filename):
     cen = np.round(arr.mean(axis=0)).astype(int)
     cen = np.clip(cen, [0, 0, 0], np.array(shape) - 1)
     centroid_voxel = [int(cen[0]), int(cen[1]), int(cen[2])]
-    mm = vol.voxel_to_mm(centroid_voxel).tolist()
+    mm = _voxel_to_mm(affine, *centroid_voxel).tolist()
 
     return jsonify(
         {
@@ -722,13 +767,12 @@ def voxel_to_mm_endpoint(filename):
     if not voxel or len(voxel) != 3:
         return jsonify({"error": "voxel [i,j,k] is required"}), 400
 
-    vol = get_volume(filepath)
-    shape = vol.data.shape
+    _, affine, shape = _open_scan_dataobj(filepath)
     i, j, k = int(voxel[0]), int(voxel[1]), int(voxel[2])
     if not (0 <= i < shape[0] and 0 <= j < shape[1] and 0 <= k < shape[2]):
         return jsonify({"error": "voxel out of volume bounds"}), 400
 
-    mm = vol.voxel_to_mm([i, j, k])
+    mm = _voxel_to_mm(affine, i, j, k)
     return jsonify(
         {
             "mm": [

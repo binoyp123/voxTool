@@ -394,12 +394,19 @@ export default function ThresholdCloudViewer({
                 fallback: true,
                 fallbackReason: data.error || data.message || "bright_component failed",
               });
+            } else {
+              setError(
+                data.message ||
+                  data.error ||
+                  "Could not pick contact — wait a moment and click again."
+              );
             }
           }
         } catch (err) {
           console.error("bright_component:", err);
           if (gen !== pickGenerationRef.current) return;
           setComponentVoxels(null);
+          setError("Pick failed — check API is awake, then click again.");
         } finally {
           if (gen === pickGenerationRef.current) setPickBusy(false);
         }
