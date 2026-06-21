@@ -120,6 +120,7 @@ export default function App() {
         const res = await fetch(`${API}/api/scans/upload`, {
           method: "POST",
           body: form,
+          signal: AbortSignal.timeout(300_000),
         });
         const data = await res.json();
         if (!res.ok || !data.success) {

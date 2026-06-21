@@ -218,7 +218,7 @@ def upload_scan():
     if not cloud_ready:
         _warm_cloud_cache_async(dest, 99.96)
 
-    _warm_volume_async(dest)
+    # Volume preload happens when the cloud tab calls /warm_volume (avoids OOM during upload).
 
     return jsonify(
         {
@@ -227,7 +227,6 @@ def upload_scan():
             "size_mb": round(size_mb, 1),
             "cloud_ready": cloud_ready,
             "cloud_warming": not cloud_ready,
-            "volume_warming": not volume_is_cached(dest),
         }
     )
 
