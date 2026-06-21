@@ -198,11 +198,6 @@ export default function ThresholdCloudViewer({
       cloudThrRef.current = data.intensity_threshold;
       rebuildPoints(data.points || [], sp);
       setLoading(false);
-
-      fetch(`${API}/api/scans/${scanFilename}/warm_volume`, {
-        method: "POST",
-        signal: AbortSignal.timeout(30_000),
-      }).catch(() => {});
     } catch (e) {
       console.error("threshold_cloud:", e);
       const msg = e?.message || String(e);
@@ -430,7 +425,12 @@ export default function ThresholdCloudViewer({
           console.error("bright_component:", err);
           if (gen !== pickGenerationRef.current) return;
           setComponentVoxels(null);
-          setError("Pick failed — wait a moment and click again.");
+          const msg = err?.message || String(err);
+          setError(
+            msg === "Failed to fetch"
+              ? "Pick could not reach the API (Render may have restarted). Re-upload the scan, Refresh cloud, try again."
+              : `Pick failed: ${msg}`
+          );
         } finally {
           clearTimeout(timeoutId);
           if (gen === pickGenerationRef.current) setPickBusy(false);

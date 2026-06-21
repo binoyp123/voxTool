@@ -408,8 +408,16 @@ def _install_bundled_cloud_cache(filepath: str, threshold_pct: float = 99.96) ->
     return True
 
 
+_DATAOBJ_CACHE: dict[str, tuple] = {}
+
+
 def _open_scan_dataobj(filepath: str):
     import nibabel as nib
+
+    abs_path = os.path.abspath(filepath)
+    cached = _DATAOBJ_CACHE.get(abs_path)
+    if cached is not None:
+        return cached
 
     img = nib.load(filepath)
     dataobj = img.dataobj
@@ -417,7 +425,9 @@ def _open_scan_dataobj(filepath: str):
         dataobj = dataobj[:, :, :, 0]
     affine = img.affine.astype(np.float64)
     shape = tuple(int(x) for x in dataobj.shape[:3])
-    return dataobj, affine, shape
+    result = (dataobj, affine, shape)
+    _DATAOBJ_CACHE[abs_path] = result
+    return result
 
 
 class _ShapeProxy:
@@ -688,16 +698,13 @@ def threshold_cloud(filename):
 
 @scans_bp.route("/<filename>/warm_volume", methods=["POST"])
 def warm_volume_route(filename):
+    """No-op on cloud deploy — loading full CT OOMs Render free tier."""
     data_dir = current_app.config["DATA_DIR"]
     filepath = os.path.join(data_dir, filename)
     if not os.path.isfile(filepath):
         return jsonify({"error": f"Scan '{filename}' not found"}), 404
 
-    if volume_is_cached(filepath):
-        return jsonify({"ready": True, "warming": False})
-
-    _warm_volume_async(filepath)
-    return jsonify({"ready": False, "warming": True})
+    return jsonify({"ready": True, "warming": False, "skipped": True})
 
 
 @scans_bp.route("/<filename>/volume_ready", methods=["GET"])
