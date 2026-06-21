@@ -60,7 +60,6 @@ export default function ThresholdCloudViewer({
   const cloudThresholdPctRef = useRef(99.96);
   const cloudThrRef = useRef(null);
   const pickAbortRef = useRef(null);
-  const volumeReadyRef = useRef(false);
   const pickGenerationRef = useRef(0);
   /** LineMaterials need `resolution` updates on resize (screen-space linewidth). */
   const fatLineMaterialsRef = useRef([]);
@@ -83,17 +82,12 @@ export default function ThresholdCloudViewer({
   const [meta, setMeta] = useState(null);
   const [componentVoxels, setComponentVoxels] = useState(null);
   const [pickBusy, setPickBusy] = useState(false);
-  const [volumeReady, setVolumeReady] = useState(false);
 
   const pickBusyRef = useRef(false);
 
   useEffect(() => {
     pickBusyRef.current = pickBusy;
   }, [pickBusy]);
-
-  useEffect(() => {
-    volumeReadyRef.current = volumeReady;
-  }, [volumeReady]);
 
   useEffect(() => {
     if (meta?.thr != null) cloudThrRef.current = meta.thr;
@@ -203,31 +197,13 @@ export default function ThresholdCloudViewer({
       });
       cloudThrRef.current = data.intensity_threshold;
       rebuildPoints(data.points || [], sp);
+      setLoading(false);
 
-      // Preload full CT in worker memory so picks match local snap/pick speed.
-      setVolumeReady(false);
-      await fetch(`${API}/api/scans/${scanFilename}/warm_volume`, {
+      // Best-effort preload; first click still works if this never finishes on Render.
+      fetch(`${API}/api/scans/${scanFilename}/warm_volume`, {
         method: "POST",
         signal: AbortSignal.timeout(30_000),
       }).catch(() => {});
-      for (let attempt = 0; attempt < 45; attempt++) {
-        const vr = await fetch(
-          `${API}/api/scans/${scanFilename}/volume_ready`,
-          { signal: AbortSignal.timeout(15_000) }
-        ).catch(() => null);
-        if (vr?.ok) {
-          const vd = await vr.json().catch(() => ({}));
-          if (vd.ready) {
-            setVolumeReady(true);
-            break;
-          }
-        }
-        if (attempt === 0) {
-          setError("Loading CT for contact picking (first time ~30s)…");
-        }
-        await new Promise((r) => setTimeout(r, 2000));
-      }
-      setError(null);
     } catch (e) {
       console.error("threshold_cloud:", e);
       const msg = e?.message || String(e);
@@ -392,11 +368,6 @@ export default function ThresholdCloudViewer({
       const fname = scanFilenameRef.current;
       if (!fname) return;
 
-      if (!volumeReadyRef.current) {
-        setError("CT still loading for picking — wait ~30s after cloud appears, then click again.");
-        return;
-      }
-
       const rect = renderer.domElement.getBoundingClientRect();
       mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -415,6 +386,7 @@ export default function ThresholdCloudViewer({
       setError(null);
 
       (async () => {
+        const timeoutId = setTimeout(() => ac.abort(), 120_000);
         try {
           const body = {
             seed_voxel: seedVoxel,
@@ -459,6 +431,7 @@ export default function ThresholdCloudViewer({
           setComponentVoxels(null);
           setError("Pick failed — wait a moment and click again.");
         } finally {
+          clearTimeout(timeoutId);
           if (gen === pickGenerationRef.current) setPickBusy(false);
         }
       })();
@@ -722,7 +695,7 @@ export default function ThresholdCloudViewer({
           {loading
             ? "Loading cloud…"
             : meta
-              ? `${meta.returned.toLocaleString()} pts displayed · ${meta.total.toLocaleString()} above threshold · thr=${meta.thr?.toFixed(1) ?? "—"}${!volumeReady ? " · CT loading…" : pickBusy ? " · snapping…" : ""}`
+              ? `${meta.returned.toLocaleString()} pts displayed · ${meta.total.toLocaleString()} above threshold · thr=${meta.thr?.toFixed(1) ?? "—"}${pickBusy ? " · snapping…" : ""}`
               : "—"}
         </span>
         <button type="button" className="btn btn-compact" onClick={fetchCloud} disabled={loading}>
@@ -732,9 +705,7 @@ export default function ThresholdCloudViewer({
       {error && <div className="cloud-error">{error}</div>}
       <div className="cloud-hint muted">
         {selectedLead
-          ? volumeReady
-            ? "Click an electrode contact — orange = nearby bright voxels; yellow = centroid (S or Submit)."
-            : "Wait for “CT loading…” to finish (~30s after cloud appears), then click contacts."
+          ? "Click an electrode contact — orange blob + yellow centroid. First click on cloud may take ~30s."
           : "Select a lead in the sidebar, then click the cloud."}
       </div>
       <div ref={wrapRef} className="cloud-canvas-wrap" />
