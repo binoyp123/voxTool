@@ -243,6 +243,14 @@ def intensity_range(filename):
     return jsonify({"p1": float(p1), "p99": float(p99)})
 
 
+def _scan_vol(filepath: str, threshold_pct: float = 99.96):
+    """Light handle when cloud cache exists (Render); full volume otherwise (local)."""
+    _install_bundled_cloud_cache(filepath, threshold_pct)
+    if os.path.isfile(_cloud_cache_path(filepath, threshold_pct)):
+        return LightScanVol(filepath, threshold_pct)
+    return get_volume(filepath)
+
+
 @scans_bp.route("/<filename>/snap", methods=["POST"])
 def snap(filename):
     """Snap a clicked mm coordinate to the centroid of nearby super-threshold voxels.
@@ -264,7 +272,7 @@ def snap(filename):
     threshold_pct = float(body.get("threshold_pct", 99.96))
     iterations = int(body.get("iterations", 2))
 
-    vol = get_volume(filepath)
+    vol = _scan_vol(filepath, threshold_pct)
     points = vol.points_above_threshold(threshold_pct)
     if points.shape[0] == 0:
         return jsonify({"success": False, "voxel_count": 0, "center_mm": point_mm})
@@ -410,6 +418,43 @@ def _open_scan_dataobj(filepath: str):
     affine = img.affine.astype(np.float64)
     shape = tuple(int(x) for x in dataobj.shape[:3])
     return dataobj, affine, shape
+
+
+class _ShapeProxy:
+    """Mimics vol.data.shape for legacy_interpolator without loading the volume."""
+
+    def __init__(self, shape: tuple[int, int, int]):
+        self.shape = shape
+
+
+class LightScanVol:
+    """Low-RAM volume handle: header + cached threshold points (Render-safe)."""
+
+    def __init__(self, filepath: str, threshold_pct: float = 99.96):
+        self.filepath = os.path.abspath(filepath)
+        _, self.affine, shape = _open_scan_dataobj(filepath)
+        self.inv_affine = np.linalg.inv(self.affine)
+        self.data = _ShapeProxy(shape)
+        self._threshold_pct = threshold_pct
+        self._threshold_points: np.ndarray | None = None
+
+    def points_above_threshold(self, threshold_pct: float) -> np.ndarray:
+        if self._threshold_points is not None:
+            return self._threshold_points
+        _install_bundled_cloud_cache(self.filepath, threshold_pct)
+        cache_path = _cloud_cache_path(self.filepath, threshold_pct)
+        with open(cache_path, encoding="utf-8") as f:
+            pts = json.load(f).get("points") or []
+        self._threshold_points = np.asarray(pts, dtype=np.float32)
+        return self._threshold_points
+
+    def mm_to_voxel(self, mm):
+        mm_h = np.array([mm[0], mm[1], mm[2], 1.0], dtype=np.float64)
+        return (self.inv_affine @ mm_h)[:3]
+
+    def voxel_to_mm(self, vox):
+        vox_h = np.array([vox[0], vox[1], vox[2], 1.0], dtype=np.float64)
+        return (self.affine @ vox_h)[:3]
 
 
 class _SlabCache:
@@ -698,14 +743,14 @@ def bright_component(filename):
     if not (0 < threshold_pct <= 100):
         return jsonify({"success": False, "error": "threshold_pct must be in (0, 100]"}), 400
 
-    vol = get_volume(filepath)
-    shape = vol.data.shape
+    dataobj, affine, shape = _open_scan_dataobj(filepath)
     si, sj, sk = int(seed[0]), int(seed[1]), int(seed[2])
     if not (0 <= si < shape[0] and 0 <= sj < shape[1] and 0 <= sk < shape[2]):
         return jsonify({"success": False, "error": "seed_voxel out of bounds"}), 400
 
     thr = _threshold_for_pick(filepath, threshold_pct, body)
-    if float(vol.data[si, sj, sk]) < thr:
+    slab = _SlabCache(dataobj)
+    if slab.value(si, sj, sk) < thr:
         return jsonify(
             {
                 "success": False,
@@ -716,8 +761,7 @@ def bright_component(filename):
 
     ex_set = _excluded_set(excluded)
 
-    # ||affine @ (voxel - seed)|| mm — translation cancels; cheap per-offset check.
-    M = vol.affine[:3, :3].astype(np.float64)
+    M = affine[:3, :3]
 
     def offset_sq_mm(di: int, dj: int, dk: int) -> float:
         v = M @ np.array([di, dj, dk], dtype=np.float64)
@@ -743,7 +787,7 @@ def bright_component(filename):
             continue
         if not within_ball(i, j, k):
             continue
-        if float(vol.data[i, j, k]) < thr:
+        if slab.value(i, j, k) < thr:
             continue
         visited.add((i, j, k))
         component.append([int(i), int(j), int(k)])
@@ -763,7 +807,7 @@ def bright_component(filename):
     cen = np.round(arr.mean(axis=0)).astype(int)
     cen = np.clip(cen, [0, 0, 0], np.array(shape) - 1)
     centroid_voxel = [int(cen[0]), int(cen[1]), int(cen[2])]
-    mm = vol.voxel_to_mm(centroid_voxel).tolist()
+    mm = _voxel_to_mm(affine, *centroid_voxel).tolist()
 
     return jsonify(
         {
@@ -792,7 +836,7 @@ def mm_to_voxel_endpoint(filename):
     if not point_mm or len(point_mm) != 3:
         return jsonify({"error": "point_mm [r,a,s] is required"}), 400
 
-    vol = get_volume(filepath)
+    vol = _scan_vol(filepath, 99.96)
     v = np.asarray(vol.mm_to_voxel(point_mm)[:3], dtype=float)
     shape = vol.data.shape
     vi = np.round(v).astype(int)
@@ -813,13 +857,12 @@ def voxel_to_mm_endpoint(filename):
     if not voxel or len(voxel) != 3:
         return jsonify({"error": "voxel [i,j,k] is required"}), 400
 
-    vol = get_volume(filepath)
-    shape = vol.data.shape
+    _, affine, shape = _open_scan_dataobj(filepath)
     i, j, k = int(voxel[0]), int(voxel[1]), int(voxel[2])
     if not (0 <= i < shape[0] and 0 <= j < shape[1] and 0 <= k < shape[2]):
         return jsonify({"error": "voxel out of volume bounds"}), 400
 
-    mm = vol.voxel_to_mm([i, j, k])
+    mm = _voxel_to_mm(affine, i, j, k)
     return jsonify(
         {
             "mm": [
@@ -858,7 +901,8 @@ def interpolate_contacts(filename):
             {"success": False, "error": "low_label and high_label must span at least 2 contacts"}
         ), 400
 
-    vol = get_volume(filepath)
+    threshold_pct = float(body.get("threshold_pct", 99.96))
+    vol = _scan_vol(filepath, threshold_pct)
     start_vox = body.get("start_voxel")
     end_vox = body.get("end_voxel")
     if start_vox is None or end_vox is None:
@@ -885,7 +929,6 @@ def interpolate_contacts(filename):
     else:
         interior_labels = list(range(low_label + 1, high_label))
 
-    threshold_pct = float(body.get("threshold_pct", 99.96))
     lead_type = body.get("lead_type")
     radius_mm = body.get("radius_mm")
     if radius_mm is None:

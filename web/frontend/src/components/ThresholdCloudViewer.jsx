@@ -199,7 +199,6 @@ export default function ThresholdCloudViewer({
       rebuildPoints(data.points || [], sp);
       setLoading(false);
 
-      // Best-effort preload; first click still works if this never finishes on Render.
       fetch(`${API}/api/scans/${scanFilename}/warm_volume`, {
         method: "POST",
         signal: AbortSignal.timeout(30_000),
@@ -419,9 +418,11 @@ export default function ThresholdCloudViewer({
           } else {
             setComponentVoxels(null);
             setError(
-              data.message ||
-                data.error ||
-                "Could not snap to contact — click directly on a bright voxel."
+              data.error?.includes("not found")
+                ? "Scan gone from Render (server restarted). Load Scan → Upload again, then Refresh cloud."
+                : data.message ||
+                    data.error ||
+                    "Could not snap to contact — click directly on a bright voxel."
             );
           }
         } catch (err) {
