@@ -58,6 +58,9 @@ export default function ThresholdCloudViewer({
   const onCloudPickRef = useRef(null);
   const scanFilenameRef = useRef(null);
   const cloudThresholdPctRef = useRef(99.96);
+  const cloudThrRef = useRef(null);
+  const pickAbortRef = useRef(null);
+  const volumeReadyRef = useRef(false);
   const pickGenerationRef = useRef(0);
   /** LineMaterials need `resolution` updates on resize (screen-space linewidth). */
   const fatLineMaterialsRef = useRef([]);
@@ -80,12 +83,21 @@ export default function ThresholdCloudViewer({
   const [meta, setMeta] = useState(null);
   const [componentVoxels, setComponentVoxels] = useState(null);
   const [pickBusy, setPickBusy] = useState(false);
+  const [volumeReady, setVolumeReady] = useState(false);
 
   const pickBusyRef = useRef(false);
 
   useEffect(() => {
     pickBusyRef.current = pickBusy;
   }, [pickBusy]);
+
+  useEffect(() => {
+    volumeReadyRef.current = volumeReady;
+  }, [volumeReady]);
+
+  useEffect(() => {
+    if (meta?.thr != null) cloudThrRef.current = meta.thr;
+  }, [meta?.thr]);
 
   const fetchCloud = useCallback(async () => {
     if (!scanFilename) return;
@@ -174,7 +186,33 @@ export default function ThresholdCloudViewer({
         shape: data.shape,
         spacing: sp,
       });
+      cloudThrRef.current = data.intensity_threshold;
       rebuildPoints(data.points || [], sp);
+
+      // Preload full CT in worker memory so picks match local snap/pick speed.
+      setVolumeReady(false);
+      await fetch(`${API}/api/scans/${scanFilename}/warm_volume`, {
+        method: "POST",
+        signal: AbortSignal.timeout(30_000),
+      }).catch(() => {});
+      for (let attempt = 0; attempt < 45; attempt++) {
+        const vr = await fetch(
+          `${API}/api/scans/${scanFilename}/volume_ready`,
+          { signal: AbortSignal.timeout(15_000) }
+        ).catch(() => null);
+        if (vr?.ok) {
+          const vd = await vr.json().catch(() => ({}));
+          if (vd.ready) {
+            setVolumeReady(true);
+            break;
+          }
+        }
+        if (attempt === 0) {
+          setError("Loading CT for contact picking (first time ~30s)…");
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      setError(null);
     } catch (e) {
       console.error("threshold_cloud:", e);
       const msg = e?.message || String(e);
@@ -332,7 +370,17 @@ export default function ThresholdCloudViewer({
     const onCanvasClick = (e) => {
       const ptsObj = pointsRef.current;
       const pickMap = pickIndexToVoxelRef.current;
-      if (!ptsObj || !pickMap || pickBusyRef.current) return;
+      if (!ptsObj || !pickMap) return;
+
+      if (!selectedLeadRef.current || !onCloudPickRef.current) return;
+
+      const fname = scanFilenameRef.current;
+      if (!fname) return;
+
+      if (!volumeReadyRef.current) {
+        setError("CT still loading for picking — wait ~30s after cloud appears, then click again.");
+        return;
+      }
 
       const rect = renderer.domElement.getBoundingClientRect();
       mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -343,25 +391,31 @@ export default function ThresholdCloudViewer({
       if (ix === null || ix < 0 || ix >= pickMap.length) return;
       const seedVoxel = pickMap[ix];
 
-      if (!selectedLeadRef.current || !onCloudPickRef.current) return;
-
-      const fname = scanFilenameRef.current;
-      if (!fname) return;
+      if (pickAbortRef.current) pickAbortRef.current.abort();
+      const ac = new AbortController();
+      pickAbortRef.current = ac;
 
       const gen = ++pickGenerationRef.current;
       setPickBusy(true);
+      setError(null);
 
       (async () => {
         try {
+          const body = {
+            seed_voxel: seedVoxel,
+            threshold_pct: cloudThresholdPctRef.current,
+            max_voxels: 12000,
+            max_ball_mm: PICK_BALL_MM,
+          };
+          if (cloudThrRef.current != null) {
+            body.intensity_threshold = cloudThrRef.current;
+          }
+
           const res = await fetch(`${API}/api/scans/${fname}/bright_component`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              seed_voxel: seedVoxel,
-              threshold_pct: cloudThresholdPctRef.current,
-              max_voxels: 12000,
-              max_ball_mm: PICK_BALL_MM,
-            }),
+            body: JSON.stringify(body),
+            signal: ac.signal,
           });
           const data = await res.json();
           if (gen !== pickGenerationRef.current) return;
@@ -376,37 +430,19 @@ export default function ThresholdCloudViewer({
               seed_voxel: seedVoxel,
             });
           } else {
-            const mmRes = await fetch(`${API}/api/scans/${fname}/voxel_to_mm`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ voxel: seedVoxel }),
-            });
-            const mmData = await mmRes.json();
-            if (gen !== pickGenerationRef.current) return;
             setComponentVoxels(null);
-            if (mmData.mm) {
-              onCloudPickRef.current({
-                centroid_voxel: [seedVoxel[0], seedVoxel[1], seedVoxel[2]],
-                centroid_mm: mmData.mm,
-                count: 1,
-                capped: false,
-                seed_voxel: seedVoxel,
-                fallback: true,
-                fallbackReason: data.error || data.message || "bright_component failed",
-              });
-            } else {
-              setError(
-                data.message ||
-                  data.error ||
-                  "Could not pick contact — wait a moment and click again."
-              );
-            }
+            setError(
+              data.message ||
+                data.error ||
+                "Could not snap to contact — click directly on a bright voxel."
+            );
           }
         } catch (err) {
+          if (err?.name === "AbortError") return;
           console.error("bright_component:", err);
           if (gen !== pickGenerationRef.current) return;
           setComponentVoxels(null);
-          setError("Pick failed — check API is awake, then click again.");
+          setError("Pick failed — wait a moment and click again.");
         } finally {
           if (gen === pickGenerationRef.current) setPickBusy(false);
         }
@@ -442,6 +478,7 @@ export default function ThresholdCloudViewer({
 
     return () => {
       ro.disconnect();
+      if (pickAbortRef.current) pickAbortRef.current.abort();
       renderer.domElement.removeEventListener("click", onCanvasClick);
       cancelAnimationFrame(animationRef.current);
       controls.dispose();
@@ -670,7 +707,7 @@ export default function ThresholdCloudViewer({
           {loading
             ? "Loading cloud…"
             : meta
-              ? `${meta.returned.toLocaleString()} pts displayed · ${meta.total.toLocaleString()} above threshold · thr=${meta.thr?.toFixed(1) ?? "—"}${pickBusy ? " · blob…" : ""}`
+              ? `${meta.returned.toLocaleString()} pts displayed · ${meta.total.toLocaleString()} above threshold · thr=${meta.thr?.toFixed(1) ?? "—"}${!volumeReady ? " · CT loading…" : pickBusy ? " · snapping…" : ""}`
               : "—"}
         </span>
         <button type="button" className="btn btn-compact" onClick={fetchCloud} disabled={loading}>
@@ -680,7 +717,9 @@ export default function ThresholdCloudViewer({
       {error && <div className="cloud-error">{error}</div>}
       <div className="cloud-hint muted">
         {selectedLead
-          ? "Click an electrode contact — orange = nearby bright voxels; yellow = centroid (S or Submit)."
+          ? volumeReady
+            ? "Click an electrode contact — orange = nearby bright voxels; yellow = centroid (S or Submit)."
+            : "Wait for “CT loading…” to finish (~30s after cloud appears), then click contacts."
           : "Select a lead in the sidebar, then click the cloud."}
       </div>
       <div ref={wrapRef} className="cloud-canvas-wrap" />

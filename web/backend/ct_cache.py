@@ -61,3 +61,14 @@ def get_volume(filepath):
         vol = CTVolume(abs_path)
         _CACHE[abs_path] = vol
         return vol
+
+
+def volume_is_cached(filepath: str) -> bool:
+    abs_path = os.path.abspath(filepath)
+    with _LOCK:
+        return abs_path in _CACHE
+
+
+def warm_volume(filepath: str) -> None:
+    """Load CT into this worker's memory (same path local snap/pick uses)."""
+    get_volume(filepath)

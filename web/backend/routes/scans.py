@@ -4,12 +4,13 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 import numpy as np
 from flask import Blueprint, send_from_directory, jsonify, current_app, request
 
-from ct_cache import get_volume
+from ct_cache import get_volume, volume_is_cached, warm_volume
 from legacy_interpolator import interpolate_between_endpoints, lead_radius_mm
 
 scans_bp = Blueprint("scans", __name__)
@@ -217,6 +218,8 @@ def upload_scan():
     if not cloud_ready:
         _warm_cloud_cache_async(dest, 99.96)
 
+    _warm_volume_async(dest)
+
     return jsonify(
         {
             "success": True,
@@ -224,6 +227,7 @@ def upload_scan():
             "size_mb": round(size_mb, 1),
             "cloud_ready": cloud_ready,
             "cloud_warming": not cloud_ready,
+            "volume_warming": not volume_is_cached(dest),
         }
     )
 
@@ -424,6 +428,23 @@ class _SlabCache:
         return float(slab[i, j])
 
 
+def _warm_volume_async(filepath: str) -> None:
+    """Preload float32 CT in this worker (matches local snap/pick; ~30s once on Render)."""
+    if volume_is_cached(filepath):
+        return
+    app = current_app._get_current_object()
+
+    def _run():
+        try:
+            with app.app_context():
+                if not volume_is_cached(filepath):
+                    warm_volume(filepath)
+        except Exception:
+            app.logger.exception("background volume warm failed")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _cached_cloud_threshold(filepath: str, threshold_pct: float) -> float | None:
     _install_bundled_cloud_cache(filepath, threshold_pct)
     cache_path = _cloud_cache_path(filepath, threshold_pct)
@@ -434,7 +455,9 @@ def _cached_cloud_threshold(filepath: str, threshold_pct: float) -> float | None
     return float(thr) if thr is not None else None
 
 
-def _threshold_for_pick(filepath: str, threshold_pct: float) -> float:
+def _threshold_for_pick(filepath: str, threshold_pct: float, body: dict | None = None) -> float:
+    if body and body.get("intensity_threshold") is not None:
+        return float(body["intensity_threshold"])
     thr = _cached_cloud_threshold(filepath, threshold_pct)
     if thr is not None:
         return thr
@@ -619,6 +642,30 @@ def threshold_cloud(filename):
     return jsonify(payload)
 
 
+@scans_bp.route("/<filename>/warm_volume", methods=["POST"])
+def warm_volume_route(filename):
+    data_dir = current_app.config["DATA_DIR"]
+    filepath = os.path.join(data_dir, filename)
+    if not os.path.isfile(filepath):
+        return jsonify({"error": f"Scan '{filename}' not found"}), 404
+
+    if volume_is_cached(filepath):
+        return jsonify({"ready": True, "warming": False})
+
+    _warm_volume_async(filepath)
+    return jsonify({"ready": False, "warming": True})
+
+
+@scans_bp.route("/<filename>/volume_ready", methods=["GET"])
+def volume_ready_route(filename):
+    data_dir = current_app.config["DATA_DIR"]
+    filepath = os.path.join(data_dir, filename)
+    if not os.path.isfile(filepath):
+        return jsonify({"ready": False, "error": f"Scan '{filename}' not found"}), 404
+
+    return jsonify({"ready": volume_is_cached(filepath)})
+
+
 @scans_bp.route("/<filename>/bright_component", methods=["POST"])
 def bright_component(filename):
     """26-connected bright-voxel blob containing seed (same threshold rule as threshold_cloud).
@@ -652,14 +699,14 @@ def bright_component(filename):
     if not (0 < threshold_pct <= 100):
         return jsonify({"success": False, "error": "threshold_pct must be in (0, 100]"}), 400
 
-    dataobj, affine, shape = _open_scan_dataobj(filepath)
+    vol = get_volume(filepath)
+    shape = vol.data.shape
     si, sj, sk = int(seed[0]), int(seed[1]), int(seed[2])
     if not (0 <= si < shape[0] and 0 <= sj < shape[1] and 0 <= sk < shape[2]):
         return jsonify({"success": False, "error": "seed_voxel out of bounds"}), 400
 
-    thr = _threshold_for_pick(filepath, threshold_pct)
-    slab = _SlabCache(dataobj)
-    if slab.value(si, sj, sk) < thr:
+    thr = _threshold_for_pick(filepath, threshold_pct, body)
+    if float(vol.data[si, sj, sk]) < thr:
         return jsonify(
             {
                 "success": False,
@@ -671,7 +718,7 @@ def bright_component(filename):
     ex_set = _excluded_set(excluded)
 
     # ||affine @ (voxel - seed)|| mm — translation cancels; cheap per-offset check.
-    M = affine[:3, :3]
+    M = vol.affine[:3, :3].astype(np.float64)
 
     def offset_sq_mm(di: int, dj: int, dk: int) -> float:
         v = M @ np.array([di, dj, dk], dtype=np.float64)
@@ -697,7 +744,7 @@ def bright_component(filename):
             continue
         if not within_ball(i, j, k):
             continue
-        if slab.value(i, j, k) < thr:
+        if float(vol.data[i, j, k]) < thr:
             continue
         visited.add((i, j, k))
         component.append([int(i), int(j), int(k)])
@@ -717,7 +764,7 @@ def bright_component(filename):
     cen = np.round(arr.mean(axis=0)).astype(int)
     cen = np.clip(cen, [0, 0, 0], np.array(shape) - 1)
     centroid_voxel = [int(cen[0]), int(cen[1]), int(cen[2])]
-    mm = _voxel_to_mm(affine, *centroid_voxel).tolist()
+    mm = vol.voxel_to_mm(centroid_voxel).tolist()
 
     return jsonify(
         {
@@ -767,12 +814,13 @@ def voxel_to_mm_endpoint(filename):
     if not voxel or len(voxel) != 3:
         return jsonify({"error": "voxel [i,j,k] is required"}), 400
 
-    _, affine, shape = _open_scan_dataobj(filepath)
+    vol = get_volume(filepath)
+    shape = vol.data.shape
     i, j, k = int(voxel[0]), int(voxel[1]), int(voxel[2])
     if not (0 <= i < shape[0] and 0 <= j < shape[1] and 0 <= k < shape[2]):
         return jsonify({"error": "voxel out of volume bounds"}), 400
 
-    mm = _voxel_to_mm(affine, i, j, k)
+    mm = vol.voxel_to_mm([i, j, k])
     return jsonify(
         {
             "mm": [
